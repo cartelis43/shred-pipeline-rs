@@ -153,7 +153,7 @@ fn parse_shred(buf: &[u8]) -> Result<DecodedShred, String> {
 // New: transaction summary & decoder helper
 //
 use serde::Serialize;
-use anyhow::{Result, Context, bail};
+use anyhow::Result;
 use bincode;
 use solana_sdk::transaction::VersionedTransaction;
 use solana_sdk::message::VersionedMessage;
