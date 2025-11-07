@@ -2,7 +2,8 @@ use futures::StreamExt;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc::Sender, oneshot};
 use tokio::task::JoinHandle;
-
+use std::net::SocketAddr;
+use std::io;
 /// Async Receiver for the Shred Pipeline.
 ///
 /// - listens on a UDP socket and forwards received datagrams into the provided mpsc::Sender<Vec<u8>>
@@ -36,8 +37,15 @@ impl Receiver {
     /// Each received datagram is forwarded as a Vec<u8> into the configured mpsc sender.
     /// Returns a JoinHandle; the task will stop when the returned oneshot sender (stored inside `self`)
     /// is triggered or if the UDP socket returns a fatal error.
+    ///
+    /// Note: use std::net::UdpSocket::bind + tokio::net::UdpSocket::from_std to avoid
+    /// ambiguity across runtime versions.
     pub fn spawn_udp_listener(&mut self, addr: &str) -> std::io::Result<()> {
-        let socket = UdpSocket::bind(addr)?;
+        // bind using std to avoid async/sync ambiguity, then convert to tokio socket
+        let std_sock = std::net::UdpSocket::bind(addr)?;
+        std_sock.set_nonblocking(true)?;
+        let socket = UdpSocket::from_std(std_sock)?;
+
         let mut shutdown_rx = {
             let (tx, rx) = oneshot::channel();
             self.shutdown_tx = Some(tx);
@@ -61,7 +69,7 @@ impl Receiver {
                                 }
                             }
                             Err(e) => {
-                                eprintln!("udp recv error: {e}");
+                                eprintln!("udp recv error: {}", e);
                                 break;
                             }
                         }
@@ -86,7 +94,7 @@ impl Receiver {
     ///   receiver.spawn_grpc_handler(stream);
     pub fn spawn_grpc_handler<S, E>(&mut self, stream: S)
     where
-        S: futures::Stream<Item = Result<Vec<u8>, E>> + Send + 'static,
+        S: futures::Stream<Item = Result<Vec<u8>, E>> + Send + Unpin + 'static,
         E: std::error::Error + Send + Sync + 'static,
     {
         let mut stream = stream;

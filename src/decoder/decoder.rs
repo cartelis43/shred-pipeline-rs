@@ -1,7 +1,7 @@
-use bytes::Buf;
-use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use bytes::{Buf, Bytes};
+use std::collections::HashMap;
 
 /// A very small, self-contained Decoder layer implementation for the Shred Pipeline.
 ///
@@ -69,14 +69,17 @@ impl Decoder {
                                         }
 
                                         // placeholder grouping logic: collect per-slot
-                                        let entry = slot_buffer.entry(shred.slot).or_default();
-                                        entry.push(shred);
+                                        let slot = shred.slot;
+                                        {
+                                            let entry = slot_buffer.entry(slot).or_default();
+                                            entry.push(shred);
+                                        }
 
-                                        // simple condition to "emit" or clear a slot: if we see 50 shreds for the slot
-                                        // (replace with your real fullness/completion condition)
-                                        if entry.len() >= 50 {
+                                        // check length without holding a mutable borrow, then remove if needed
+                                        let len = slot_buffer.get(&slot).map(|v| v.len()).unwrap_or(0);
+                                        if len >= 50 {
                                             // in a real implementation you'd attempt reconstruction here
-                                            slot_buffer.remove(&entry[0].slot);
+                                            let _ = slot_buffer.remove(&slot);
                                         }
                                     }
                                     Err(e) => {
@@ -125,7 +128,7 @@ fn parse_shred(buf: &[u8]) -> Result<DecodedShred, String> {
     }
 
     // Using bytes::Buf for convenient LE reads (bytes crate is a small dependency).
-    let mut b = bytes::Bytes::copy_from_slice(buf);
+    let mut b = Bytes::copy_from_slice(buf);
 
     let slot = b.get_u64_le();
     let index = b.get_u32_le();
