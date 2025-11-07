@@ -72,8 +72,17 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
                             Err(e) => {
-                                // keep logs concise; include error cause for debugging
-                                eprintln!("decode_raw_tx error slot={} index={}: {}", shred.slot, shred.index, e);
+                                // Log error + base64 prefix of the payload to help implement parser
+                                let b64 = base64::encode(&shred.payload);
+                                let prefix = if b64.len() > 512 { &b64[..512] } else { &b64 };
+                                eprintln!(
+                                    "decode_raw_tx error slot={} index={}: {} payload_len={} payload_base64_prefix={}",
+                                    shred.slot,
+                                    shred.index,
+                                    e,
+                                    shred.payload.len(),
+                                    prefix
+                                );
                             }
                         }
                     }
