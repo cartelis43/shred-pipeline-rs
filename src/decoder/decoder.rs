@@ -3,7 +3,7 @@ use tokio::task::JoinHandle;
 use bytes::{Buf, Bytes};
 use std::collections::HashMap;
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 
 /// A very small, self-contained Decoder layer implementation for the Shred Pipeline.
 ///
@@ -155,11 +155,8 @@ fn parse_shred(buf: &[u8]) -> Result<DecodedShred, String> {
 use serde::Serialize;
 use anyhow::Result;
 use bincode;
-use solana_sdk::{
-    message::{VersionedMessage, Message, v0::LoadedMessage},
-    transaction::VersionedTransaction,
-    pubkey::Pubkey,
-};
+use solana_sdk::transaction::VersionedTransaction;
+use solana_sdk::message::VersionedMessage;
 
 #[derive(Debug, Serialize, Clone)]
 pub struct DecodedTxSummary {
@@ -172,6 +169,10 @@ pub struct DecodedTxSummary {
 
 /// Try to decode a raw serialized VersionedTransaction (bincode-serialized) into a summary.
 /// Returns anyhow::Result for simple error propagation.
+///
+/// Note: currently only Legacy (non-V0) messages are fully supported.
+/// V0 (address-table/loaded) messages return an error; implementing V0 requires
+/// address table expansion using on-chain lookups and is out of scope for this patch.
 pub fn decode_raw_tx(slot: u64, raw_tx: &[u8]) -> Result<DecodedTxSummary> {
     // Attempt to deserialize via bincode
     let tx: VersionedTransaction =
@@ -184,38 +185,24 @@ pub fn decode_raw_tx(slot: u64, raw_tx: &[u8]) -> Result<DecodedTxSummary> {
         .map(|s| s.to_string())
         .unwrap_or_default();
 
-    // Access versioned message
-    let message = tx.message();
+    // Access versioned message via the public field
+    let message = &tx.message;
 
-    // account_keys: try to get account keys for both Legacy and V0 messages
-    let account_keys: Vec<String> = match message {
-        VersionedMessage::Legacy(msg) => msg
-            .account_keys
-            .iter()
-            .map(|k| k.to_string())
-            .collect(),
-        VersionedMessage::V0(loaded) => {
-            // LoadedMessage contains static account keys and lookups (addresses).
-            // We will produce a flattened list that includes the static keys only,
-            // which is sufficient to resolve program_id_index for many txns.
-            // For full correctness you'd need to expand address table lookups into keys.
-            let mut keys: Vec<String> = loaded
-                .static_account_keys()
-                .iter()
-                .map(|k| k.to_string())
-                .collect();
-
-            // If loaded.message has additional loaded addresses we skip them for now
-            // (implementing address table expansion requires on-chain lookup of address tables).
-            keys
-        }
-    };
-
-    // num_required_signatures: derive from the message header
-    let num_required_signatures = match message {
-        VersionedMessage::Legacy(msg) => msg.header.num_required_signatures as usize,
-        VersionedMessage::V0(loaded) => loaded.header.num_required_signatures as usize,
-    };
+    // account_keys and other derived fields
+    let (account_keys, num_required_signatures, instructions): (Vec<String>, usize, Vec<_>) =
+        match message {
+            VersionedMessage::Legacy(msg) => {
+                let keys = msg.account_keys.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+                let nreq = msg.header.num_required_signatures as usize;
+                let instrs = msg.instructions.clone();
+                (keys, nreq, instrs)
+            }
+            VersionedMessage::V0(_) => {
+                // V0 messages require address-table expansion to obtain the full account keys list.
+                // Return an explicit error for now.
+                bail!("V0 VersionedMessage not supported yet (address-table expansion required)");
+            }
+        };
 
     // signers: first num_required_signatures account keys
     let signers: Vec<String> = account_keys
@@ -224,27 +211,13 @@ pub fn decode_raw_tx(slot: u64, raw_tx: &[u8]) -> Result<DecodedTxSummary> {
         .cloned()
         .collect();
 
-    // program_ids: get unique program id keys used by instructions
+    // program_ids: unique program id keys used by instructions
     let mut program_ids = Vec::<String>::new();
-    match message {
-        VersionedMessage::Legacy(msg) => {
-            for ix in &msg.instructions {
-                let pid_idx = ix.program_id_index as usize;
-                if let Some(pid) = account_keys.get(pid_idx) {
-                    if !program_ids.contains(pid) {
-                        program_ids.push(pid.clone());
-                    }
-                }
-            }
-        }
-        VersionedMessage::V0(loaded) => {
-            for ix in &loaded.instructions {
-                let pid_idx = ix.program_id_index as usize;
-                if let Some(pid) = account_keys.get(pid_idx) {
-                    if !program_ids.contains(pid) {
-                        program_ids.push(pid.clone());
-                    }
-                }
+    for ix in &instructions {
+        let pid_idx = ix.program_id_index as usize;
+        if let Some(pid) = account_keys.get(pid_idx) {
+            if !program_ids.contains(pid) {
+                program_ids.push(pid.clone());
             }
         }
     }
@@ -262,22 +235,16 @@ pub fn decode_raw_tx(slot: u64, raw_tx: &[u8]) -> Result<DecodedTxSummary> {
 mod tests {
     use super::*;
     use bs58;
-    use solana_sdk::signature::Signature;
 
-    // This test is illustrative and expects a real base58 tx string.
-    // Replace TX_BASE58 with a valid serialized VersionedTransaction base58 string to test.
+    // Placeholder test; provide a real base58-encoded serialized VersionedTransaction to test.
     #[test]
     fn decode_sample_tx_roundtrip() {
-        // Example placeholder: an empty vector will fail; this test demonstrates usage only.
-        // To run a real test, replace this with a real serialized tx base58 string.
-        let tx_base58 = ""; // <-- put a real base58-encoded bincode(serialized VersionedTransaction) here
+        let tx_base58 = ""; // put real base58 here to test
         if tx_base58.is_empty() {
-            // nothing to test in CI, treat as passed
             return;
         }
         let raw = bs58::decode(tx_base58).into_vec().expect("base58 decode");
         let summary = decode_raw_tx(0, &raw).expect("decode");
-        // basic assertions
         assert!(summary.account_keys.len() >= summary.signers.len());
     }
 }
