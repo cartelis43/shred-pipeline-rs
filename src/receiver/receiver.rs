@@ -2,8 +2,6 @@ use futures::StreamExt;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc::Sender, oneshot};
 use tokio::task::JoinHandle;
-use std::net::SocketAddr;
-use std::io;
 /// Async Receiver for the Shred Pipeline.
 ///
 /// - listens on a UDP socket and forwards received datagrams into the provided mpsc::Sender<Vec<u8>>
@@ -51,7 +49,7 @@ impl Receiver {
             self.shutdown_tx = Some(tx);
             rx
         };
-        let mut sender = self.sender.clone();
+        let sender = self.sender.clone();
 
         let handle = tokio::spawn(async move {
             let mut buf = vec![0u8; 65_536];
@@ -69,7 +67,7 @@ impl Receiver {
                                 }
                             }
                             Err(e) => {
-                                eprintln!("udp recv error: {}", e);
+                                eprintln!("udp recv error: {e}");
                                 break;
                             }
                         }
@@ -98,7 +96,7 @@ impl Receiver {
         E: std::error::Error + Send + Sync + 'static,
     {
         let mut stream = stream;
-        let mut sender = self.sender.clone();
+        let sender = self.sender.clone();
 
         let handle = tokio::spawn(async move {
             while let Some(item) = stream.next().await {
