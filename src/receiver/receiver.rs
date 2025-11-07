@@ -4,6 +4,7 @@ use futures::StreamExt;
 use tokio::sync::{mpsc::Sender, oneshot};
 use tokio::task::JoinHandle;
 use anyhow::Context;
+use tonic::Request;
 
 /// Async Receiver for the Shred Pipeline.
 ///
@@ -154,16 +155,13 @@ impl GrpcReceiver {
     /// Connect to `endpoint` (e.g. "http://127.0.0.1:9000") and start reading the
     /// SubscribeEntries stream, forwarding each Entry.entries to `sender`.
     pub async fn spawn(endpoint: &str, sender: Sender<Vec<u8>>) -> anyhow::Result<Self> {
-        // shutdown channel for background task
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 
-        // Connect to service
         let mut client = ShredstreamProxyClient::connect(endpoint.to_string())
             .await
             .context("failed to connect to gRPC endpoint")?;
 
-        // subscribe
-        let req = tonic::Request::new(SubscribeEntriesRequest {});
+        let req = Request::new(SubscribeEntriesRequest {});
         let response = client
             .subscribe_entries(req)
             .await
@@ -184,14 +182,11 @@ impl GrpcReceiver {
                     msg = stream.message() => {
                         match msg {
                             Ok(Some(entry)) => {
-                                // forward the serialized entries bytes downstream
                                 if task_sender.send(entry.entries).await.is_err() {
-                                    // downstream closed; stop
                                     break;
                                 }
                             }
                             Ok(None) => {
-                                // server closed stream
                                 break;
                             }
                             Err(e) => {
