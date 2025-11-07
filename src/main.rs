@@ -3,7 +3,7 @@ use std::env;
 use tokio::sync::mpsc;
 use serde::Serialize;
 
-use shred_pipeline_rs::decoder::{DecodedShred, decode_raw_tx};
+use shred_pipeline_rs::decoder::{DecodedShred, decode_raw_txs};
 use shred_pipeline_rs::receiver::GrpcReceiver;
 
 #[derive(Serialize)]
@@ -47,30 +47,32 @@ async fn main() -> anyhow::Result<()> {
             maybe = shred_rx.recv() => {
                 match maybe {
                     Some(shred) => {
-                        // Try to decode the raw_tx payload into a transaction summary.
-                        match decode_raw_tx(shred.slot, &shred.payload) {
-                            Ok(summary) => {
-                                let out = OutputTx {
-                                    signature: summary.signature.clone(),
-                                    slot: Some(summary.slot),
-                                    index: Some(shred.index),
-                                    success: None,
-                                    fee: None,
-                                    instructions: Vec::new(),
-                                    accounts: Vec::new(),
-                                    tags: Vec::new(),
-                                    signature_raw: summary.signature,
-                                    signers: summary.signers,
-                                    account_keys: summary.account_keys,
-                                    program_ids: summary.program_ids,
-                                    meta: std::collections::HashMap::new(),
-                                };
-                                if let Ok(line) = serde_json::to_string(&out) {
-                                    println!("{}", line);
+                        // Try to decode the payload as one-or-many transactions.
+                        match decode_raw_txs(shred.slot, &shred.payload) {
+                            Ok(summaries) => {
+                                for summary in summaries {
+                                    let out = OutputTx {
+                                        signature: summary.signature.clone(),
+                                        slot: Some(summary.slot),
+                                        index: Some(shred.index),
+                                        success: None,
+                                        fee: None,
+                                        instructions: Vec::new(),
+                                        accounts: Vec::new(),
+                                        tags: Vec::new(),
+                                        signature_raw: summary.signature,
+                                        signers: summary.signers,
+                                        account_keys: summary.account_keys,
+                                        program_ids: summary.program_ids,
+                                        meta: std::collections::HashMap::new(),
+                                    };
+                                    if let Ok(line) = serde_json::to_string(&out) {
+                                        println!("{}", line);
+                                    }
                                 }
                             }
                             Err(e) => {
-                                // If decode fails, log a compact error message with slot/index
+                                // keep logs concise; include error cause for debugging
                                 eprintln!("decode_raw_tx error slot={} index={}: {}", shred.slot, shred.index, e);
                             }
                         }

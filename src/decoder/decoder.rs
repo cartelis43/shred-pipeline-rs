@@ -153,7 +153,7 @@ fn parse_shred(buf: &[u8]) -> Result<DecodedShred, String> {
 // New: transaction summary & decoder helper
 //
 use serde::Serialize;
-use anyhow::Result;
+use anyhow::{Result, Context, bail};
 use bincode;
 use solana_sdk::transaction::VersionedTransaction;
 use solana_sdk::message::VersionedMessage;
@@ -167,17 +167,8 @@ pub struct DecodedTxSummary {
     pub program_ids: Vec<String>,
 }
 
-/// Try to decode a raw serialized VersionedTransaction (bincode-serialized) into a summary.
-/// Returns anyhow::Result for simple error propagation.
-///
-/// Note: currently only Legacy (non-V0) messages are fully supported.
-/// V0 (address-table/loaded) messages return an error; implementing V0 requires
-/// address table expansion using on-chain lookups and is out of scope for this patch.
-pub fn decode_raw_tx(slot: u64, raw_tx: &[u8]) -> Result<DecodedTxSummary> {
-    // Attempt to deserialize via bincode
-    let tx: VersionedTransaction =
-        bincode::deserialize(raw_tx).context("failed to bincode-deserialize VersionedTransaction")?;
-
+/// Decode a single VersionedTransaction -> DecodedTxSummary (same logic as before)
+pub fn decode_raw_tx(slot: u64, tx: &VersionedTransaction) -> Result<DecodedTxSummary> {
     // signature (first signature if present)
     let signature = tx
         .signatures
@@ -231,20 +222,44 @@ pub fn decode_raw_tx(slot: u64, raw_tx: &[u8]) -> Result<DecodedTxSummary> {
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use bs58;
-
-    // Placeholder test; provide a real base58-encoded serialized VersionedTransaction to test.
-    #[test]
-    fn decode_sample_tx_roundtrip() {
-        let tx_base58 = ""; // put real base58 here to test
-        if tx_base58.is_empty() {
-            return;
+/// Try multiple strategies to obtain one-or-many VersionedTransaction objects from raw bytes.
+///
+/// Strategies:
+/// 1) bincode deserialize as a single VersionedTransaction
+/// 2) bincode deserialize as Vec<VersionedTransaction>
+///
+/// Returns Vec<DecodedTxSummary> on success, or an error describing why none matched.
+pub fn decode_raw_txs(slot: u64, raw_tx: &[u8]) -> Result<Vec<DecodedTxSummary>> {
+    // Try single tx
+    match bincode::deserialize::<VersionedTransaction>(raw_tx) {
+        Ok(tx) => {
+            let s = decode_raw_tx(slot, &tx)
+                .context("failed to summarize single VersionedTransaction")?;
+            return Ok(vec![s]);
         }
-        let raw = bs58::decode(tx_base58).into_vec().expect("base58 decode");
-        let summary = decode_raw_tx(0, &raw).expect("decode");
-        assert!(summary.account_keys.len() >= summary.signers.len());
+        Err(_) => {
+            // fallthrough to try vec
+        }
+    }
+
+    // Try Vec<VersionedTransaction>
+    match bincode::deserialize::<Vec<VersionedTransaction>>(raw_tx) {
+        Ok(txs) => {
+            let mut summaries = Vec::with_capacity(txs.len());
+            for tx in txs.iter() {
+                match decode_raw_tx(slot, tx) {
+                    Ok(s) => summaries.push(s),
+                    Err(e) => {
+                        // if one tx in the vec fails (e.g. V0), return error for clarity
+                        return Err(e).context("failed to summarize one tx inside Vec<VersionedTransaction>");
+                    }
+                }
+            }
+            return Ok(summaries);
+        }
+        Err(e) => {
+            // both attempts failed: return original error
+            return Err(e).context("raw bytes are neither bincode-serialized VersionedTransaction nor Vec<VersionedTransaction>");
+        }
     }
 }
