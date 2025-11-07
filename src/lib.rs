@@ -10,3 +10,6 @@ pub mod error;
 pub mod shredstream {
     tonic::include_proto!("shredstream");
 }
+
+// Re-export the DecodedTxSummary so main.rs can import it if desired
+pub use crate::decoder::DecodedTxSummary;
