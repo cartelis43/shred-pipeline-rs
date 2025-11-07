@@ -183,10 +183,12 @@ impl GrpcReceiver {
                         match msg {
                             Ok(Some(entry)) => {
                                 if task_sender.send(entry.entries).await.is_err() {
+                                    // downstream closed; stop
                                     break;
                                 }
                             }
                             Ok(None) => {
+                                // server closed stream
                                 break;
                             }
                             Err(e) => {
