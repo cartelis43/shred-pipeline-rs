@@ -1,13 +1,11 @@
 use std::env;
 
-use tokio::signal;
 use tokio::sync::mpsc;
-use tokio::time::{sleep, Duration};
-
 use serde::Serialize;
+use tokio::time::{Duration, sleep};
 
-use decoder::DecodedShred;
-use receiver::Receiver;
+use shred_pipeline_rs::decoder::{DecodedShred, Decoder};
+use shred_pipeline_rs::receiver::Receiver;
 
 #[derive(Serialize)]
 struct OutputTx {
@@ -44,46 +42,53 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // spawn decoder task that reads from raw_rx and sends DecodedShred into shred_tx
-    // decoder::Decoder::spawn consumes the receiver side (raw_rx)
-    let decoder = decoder::Decoder::spawn(raw_rx, shred_tx);
-
-    // spawn a task that listens for Ctrl+C and triggers shutdown
-    let shutdown_handle = tokio::spawn(async move {
-        let _ = signal::ctrl_c().await;
-    });
+    let decoder = Decoder::spawn(raw_rx, shred_tx);
 
     // print decoded shreds as JSONL of DecodedTx-like objects
-    while let Some(shred) = shred_rx.recv().await {
-        // map the DecodedShred into a JSON-serializable OutputTx (a simplified DecodedTx)
-        let out = OutputTx {
-            signature: String::new(),
-            slot: Some(shred.slot),
-            index: Some(shred.index),
-            success: None,
-            fee: None,
-            instructions: Vec::new(),
-            accounts: Vec::new(),
-            tags: Vec::new(),
-            raw_tx: shred.payload,
-            meta: std::collections::HashMap::new(),
-        };
-
-        match serde_json::to_string(&out) {
-            Ok(line) => {
-                println!("{}", line);
-            }
-            Err(e) => {
-                eprintln!("failed to serialize decoded tx: {}", e);
-            }
-        }
-
-        // cooperative yield to allow shutdown detection
+    loop {
         tokio::select! {
-            _ = sleep(Duration::from_millis(0)) => {}
-            _ = &mut shutdown_handle.clone() => {
+            maybe = shred_rx.recv() => {
+                match maybe {
+                    Some(shred) => {
+                        // map the DecodedShred into a JSON-serializable OutputTx (a simplified DecodedTx)
+                        let out = OutputTx {
+                            signature: String::new(),
+                            slot: Some(shred.slot),
+                            index: Some(shred.index),
+                            success: None,
+                            fee: None,
+                            instructions: Vec::new(),
+                            accounts: Vec::new(),
+                            tags: Vec::new(),
+                            raw_tx: shred.payload,
+                            meta: std::collections::HashMap::new(),
+                        };
+
+                        match serde_json::to_string(&out) {
+                            Ok(line) => {
+                                println!("{}", line);
+                            }
+                            Err(e) => {
+                                eprintln!("failed to serialize decoded tx: {}", e);
+                            }
+                        }
+                    }
+                    None => {
+                        // channel closed, exit loop
+                        break;
+                    }
+                }
+            }
+
+            // shutdown on Ctrl+C
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("shutdown signal received");
                 break;
             }
         }
+
+        // small yield to avoid starving other tasks (optional)
+        sleep(Duration::from_millis(0)).await;
     }
 
     // graceful shutdown: stop decoder and receiver
