@@ -3,3 +3,10 @@
 
 pub mod receiver;
 pub mod decoder;
+pub mod types;
+pub mod error;
+
+// generated proto module (from build.rs / tonic-build)
+pub mod shredstream {
+    tonic::include_proto!("shredstream");
+}

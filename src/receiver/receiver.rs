@@ -1,7 +1,13 @@
+use crate::shredstream::shred_stream_client::ShredStreamClient;
+use crate::shredstream::Empty;
 use futures::StreamExt;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc::Sender, oneshot};
 use tokio::task::JoinHandle;
+use tonic::transport::Channel;
+use tonic::Status;
+use anyhow::Context;
+
 /// Async Receiver for the Shred Pipeline.
 ///
 /// - listens on a UDP socket and forwards received datagrams into the provided mpsc::Sender<Vec<u8>>
@@ -140,4 +146,92 @@ impl Receiver {
     }
 }
 
-// Note: we intentionally do not implement Drop to block on async joins; call `shutdown().await` from async context.
+/// GrpcReceiver connects to a ShredStream gRPC endpoint and forwards Entry.payload
+/// into the provided mpsc::Sender<Vec<u8>> for the Decoder layer to consume.
+///
+/// Usage:
+///   let (tx, rx) = tokio::sync::mpsc::channel(1024);
+///   let receiver = GrpcReceiver::spawn("http://127.0.0.1:9000", tx).await?;
+pub struct GrpcReceiver {
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl GrpcReceiver {
+    /// Connect to `endpoint` (e.g. "http://127.0.0.1:9000") and start reading the
+    /// SubscribeEntries stream, forwarding each Entry.payload to `sender`.
+    pub async fn spawn(endpoint: &str, sender: Sender<Vec<u8>>) -> anyhow::Result<Self> {
+        // Create shutdown channel for the background task
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+
+        // Connect to tonic channel
+        let channel = Channel::from_shared(endpoint.to_string())
+            .context("invalid GRPC endpoint URL")?
+            .connect()
+            .await
+            .context("failed to connect to gRPC endpoint")?;
+
+        let mut client = ShredStreamClient::new(channel);
+
+        // create request and subscribe
+        let req = tonic::Request::new(Empty {});
+
+        let mut stream = client
+            .subscribe_entries(req)
+            .await
+            .context("subscribe_entries RPC failed")?
+            .into_inner();
+
+        // clone sender into task
+        let task_sender = sender.clone();
+
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+
+                    _ = &mut shutdown_rx => {
+                        // shutdown requested
+                        break;
+                    }
+
+                    msg = stream.message() => {
+                        match msg {
+                            Ok(Some(entry)) => {
+                                // forward payload bytes (best-effort)
+                                if let Err(_e) = task_sender.send(entry.payload).await {
+                                    // downstream closed -> stop
+                                    break;
+                                }
+                            }
+                            Ok(None) => {
+                                // server closed stream
+                                break;
+                            }
+                            Err(e) => {
+                                // log error and stop
+                                eprintln!("grpc stream error: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(Self {
+            shutdown_tx: Some(shutdown_tx),
+            handle: Some(handle),
+        })
+    }
+
+    /// Request graceful shutdown and wait for background task to finish.
+    pub async fn shutdown(mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(h) = self.handle.take() {
+            let _ = h.await;
+        }
+    }
+}

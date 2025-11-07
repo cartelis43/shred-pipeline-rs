@@ -1,4 +1,4 @@
 // src/receiver/mod.rs
 
 pub mod receiver;
-pub use receiver::*;
+pub use receiver::GrpcReceiver;

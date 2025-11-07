@@ -1,0 +1,16 @@
+syntax = "proto3";
+package shredstream;
+
+// Simple empty message (no external dependencies)
+message Empty {}
+
+message Entry {
+  bytes payload = 1;
+  uint64 slot = 2;
+  uint32 index = 3;
+}
+
+service ShredStream {
+  // SubscribeEntries stream -> server stream of Entry
+  rpc SubscribeEntries(Empty) returns (stream Entry);
+}

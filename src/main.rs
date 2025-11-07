@@ -2,10 +2,10 @@ use std::env;
 
 use tokio::sync::mpsc;
 use serde::Serialize;
-use tokio::time::{Duration, sleep};
 
-use shred_pipeline_rs::decoder::{DecodedShred, Decoder};
-use shred_pipeline_rs::receiver::Receiver;
+use shred_pipeline_rs::decoder::Decoder;
+use shred_pipeline_rs::receiver::GrpcReceiver;
+use shred_pipeline_rs::decoder::DecodedShred;
 
 #[derive(Serialize)]
 struct OutputTx {
@@ -23,34 +23,27 @@ struct OutputTx {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
-    // bind address can be overridden with UDP_BIND env var
-    let bind_addr = env::var("UDP_BIND").unwrap_or_else(|_| "0.0.0.0:8001".to_string());
+    let endpoint = env::var("GRPC_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:9000".to_string());
 
-    // channel carrying raw datagrams from Receiver -> Decoder
+    // Raw byte channel from Receiver -> Decoder
     let (raw_tx, raw_rx) = mpsc::channel::<Vec<u8>>(1024);
 
-    // channel carrying decoded shreds from Decoder -> this printer
+    // Decoded shreds channel from Decoder -> printer
     let (shred_tx, mut shred_rx) = mpsc::channel::<DecodedShred>(1024);
 
-    // create Receiver and start UDP listener
-    let mut receiver = Receiver::new(raw_tx.clone());
-    if let Err(e) = receiver.spawn_udp_listener(&bind_addr) {
-        eprintln!("failed to bind UDP listener to {}: {}", bind_addr, e);
-        // continue — user may feed packets via receiver.feed_bytes in other code paths
-    } else {
-        eprintln!("listening for UDP datagrams on {}", bind_addr);
-    }
+    // start gRPC receiver
+    let receiver = GrpcReceiver::spawn(&endpoint, raw_tx).await?;
+    eprintln!("connected to gRPC endpoint: {}", endpoint);
 
-    // spawn decoder task that reads from raw_rx and sends DecodedShred into shred_tx
+    // spawn decoder task
     let decoder = Decoder::spawn(raw_rx, shred_tx);
 
-    // print decoded shreds as JSONL of DecodedTx-like objects
+    // Print JSONL output until stream closed or Ctrl+C
     loop {
         tokio::select! {
             maybe = shred_rx.recv() => {
                 match maybe {
                     Some(shred) => {
-                        // map the DecodedShred into a JSON-serializable OutputTx (a simplified DecodedTx)
                         let out = OutputTx {
                             signature: String::new(),
                             slot: Some(shred.slot),
@@ -63,35 +56,22 @@ async fn main() -> anyhow::Result<()> {
                             raw_tx: shred.payload,
                             meta: std::collections::HashMap::new(),
                         };
-
-                        match serde_json::to_string(&out) {
-                            Ok(line) => {
-                                println!("{}", line);
-                            }
-                            Err(e) => {
-                                eprintln!("failed to serialize decoded tx: {}", e);
-                            }
+                        if let Ok(line) = serde_json::to_string(&out) {
+                            println!("{}", line);
                         }
                     }
-                    None => {
-                        // channel closed, exit loop
-                        break;
-                    }
+                    None => break,
                 }
             }
 
-            // shutdown on Ctrl+C
             _ = tokio::signal::ctrl_c() => {
                 eprintln!("shutdown signal received");
                 break;
             }
         }
-
-        // small yield to avoid starving other tasks (optional)
-        sleep(Duration::from_millis(0)).await;
     }
 
-    // graceful shutdown: stop decoder and receiver
+    // graceful shutdown
     decoder.shutdown().await;
     receiver.shutdown().await;
 
