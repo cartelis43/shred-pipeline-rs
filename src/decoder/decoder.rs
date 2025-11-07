@@ -3,8 +3,6 @@ use tokio::task::JoinHandle;
 use bytes::{Buf, Bytes};
 use std::collections::HashMap;
 
-use anyhow::{Context, bail};
-
 /// A very small, self-contained Decoder layer implementation for the Shred Pipeline.
 ///
 /// Notes:
