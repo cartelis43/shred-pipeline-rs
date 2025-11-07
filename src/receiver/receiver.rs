@@ -1,11 +1,8 @@
-use crate::shredstream::shred_stream_client::ShredStreamClient;
-use crate::shredstream::Empty;
+use crate::shredstream::shredstream_proxy_client::ShredstreamProxyClient;
+use crate::shredstream::SubscribeEntriesRequest;
 use futures::StreamExt;
-use tokio::net::UdpSocket;
 use tokio::sync::{mpsc::Sender, oneshot};
 use tokio::task::JoinHandle;
-use tonic::transport::Channel;
-use tonic::Status;
 use anyhow::Context;
 
 /// Async Receiver for the Shred Pipeline.
