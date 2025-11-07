@@ -1,4 +1,6 @@
 use std::env;
+use std::fs;
+use std::path::Path;
 
 use tokio::sync::mpsc;
 use serde::Serialize;
@@ -72,16 +74,20 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
                             Err(e) => {
-                                // Log error + base64 prefix of the payload to help implement parser
+                                // Log error + write full base64 payload to a file for inspection
                                 let b64 = base64::encode(&shred.payload);
-                                let prefix = if b64.len() > 512 { &b64[..512] } else { &b64 };
+                                let filename = format!("/tmp/shred_payload_slot{}_index{}.b64", shred.slot, shred.index);
+                                // write only once (ignore errors)
+                                if !Path::new(&filename).exists() {
+                                    let _ = fs::write(&filename, &b64);
+                                }
                                 eprintln!(
-                                    "decode_raw_tx error slot={} index={}: {} payload_len={} payload_base64_prefix={}",
+                                    "decode_raw_tx error slot={} index={}: {} payload_len={} written={}",
                                     shred.slot,
                                     shred.index,
                                     e,
                                     shred.payload.len(),
-                                    prefix
+                                    filename
                                 );
                             }
                         }
