@@ -153,10 +153,12 @@ fn parse_shred(buf: &[u8]) -> Result<DecodedShred, String> {
 // New: transaction summary & decoder helper
 //
 use serde::Serialize;
-use anyhow::Result;
+use anyhow::{Result, Context, bail};
 use bincode;
 use solana_sdk::transaction::VersionedTransaction;
 use solana_sdk::message::VersionedMessage;
+use std::io::Cursor;
+use byteorder::{LittleEndian, ReadBytesExt};
 
 #[derive(Debug, Serialize, Clone)]
 pub struct DecodedTxSummary {
@@ -222,11 +224,70 @@ pub fn decode_raw_tx(slot: u64, tx: &VersionedTransaction) -> Result<DecodedTxSu
     })
 }
 
+/// Try to extract inner tx byte slices from several common container encodings.
+fn extract_tx_byte_slices(raw: &[u8]) -> Vec<Vec<u8>> {
+    // 1) Try decode as bincode Vec<Vec<u8>>
+    if let Ok(v) = bincode::deserialize::<Vec<Vec<u8>>>(raw) {
+        if !v.is_empty() {
+            return v;
+        }
+    }
+
+    // 2) Try parse as u32_le length-prefixed frames
+    let mut frames = Vec::new();
+    let mut cur = Cursor::new(raw);
+    while (cur.position() as usize) < raw.len() {
+        if let Ok(len) = cur.read_u32::<LittleEndian>() {
+            let len_usize = len as usize;
+            let pos = cur.position() as usize;
+            if pos + len_usize > raw.len() {
+                frames.clear();
+                break;
+            }
+            frames.push(raw[pos..pos + len_usize].to_vec());
+            let _ = cur.set_position((pos + len_usize) as u64);
+        } else {
+            frames.clear();
+            break;
+        }
+    }
+    if !frames.is_empty() {
+        return frames;
+    }
+
+    // 3) Try parse as u16_le length-prefixed frames
+    let mut frames16 = Vec::new();
+    let mut cur2 = Cursor::new(raw);
+    while (cur2.position() as usize) < raw.len() {
+        if let Ok(len) = cur2.read_u16::<LittleEndian>() {
+            let len_usize = len as usize;
+            let pos = cur2.position() as usize;
+            if pos + len_usize > raw.len() {
+                frames16.clear();
+                break;
+            }
+            frames16.push(raw[pos..pos + len_usize].to_vec());
+            let _ = cur2.set_position((pos + len_usize) as u64);
+        } else {
+            frames16.clear();
+            break;
+        }
+    }
+    if !frames16.is_empty() {
+        return frames16;
+    }
+
+    // nothing extracted
+    Vec::new()
+}
+
 /// Try multiple strategies to obtain one-or-many VersionedTransaction objects from raw bytes.
 ///
 /// Strategies:
 /// 1) bincode deserialize as a single VersionedTransaction
 /// 2) bincode deserialize as Vec<VersionedTransaction>
+/// 3) bincode deserialize as Vec<Vec<u8>> -> each inner bincode deserialize VersionedTransaction
+/// 4) length-prefixed frames (u32/u16) -> each frame bincode deserialize VersionedTransaction
 ///
 /// Returns Vec<DecodedTxSummary> on success, or an error describing why none matched.
 pub fn decode_raw_txs(slot: u64, raw_tx: &[u8]) -> Result<Vec<DecodedTxSummary>> {
@@ -238,28 +299,42 @@ pub fn decode_raw_txs(slot: u64, raw_tx: &[u8]) -> Result<Vec<DecodedTxSummary>>
             return Ok(vec![s]);
         }
         Err(_) => {
-            // fallthrough to try vec
+            // fallthrough to try other strategies
         }
     }
 
     // Try Vec<VersionedTransaction>
-    match bincode::deserialize::<Vec<VersionedTransaction>>(raw_tx) {
-        Ok(txs) => {
-            let mut summaries = Vec::with_capacity(txs.len());
-            for tx in txs.iter() {
-                match decode_raw_tx(slot, tx) {
-                    Ok(s) => summaries.push(s),
-                    Err(e) => {
-                        // if one tx in the vec fails (e.g. V0), return error for clarity
-                        return Err(e).context("failed to summarize one tx inside Vec<VersionedTransaction>");
-                    }
+    if let Ok(txs) = bincode::deserialize::<Vec<VersionedTransaction>>(raw_tx) {
+        let mut summaries = Vec::with_capacity(txs.len());
+        for tx in txs.into_iter() {
+            let s = decode_raw_tx(slot, &tx)
+                .context("failed to summarize one tx inside Vec<VersionedTransaction>")?;
+            summaries.push(s);
+        }
+        return Ok(summaries);
+    }
+
+    // Try to extract inner byte frames
+    let frames = extract_tx_byte_slices(raw_tx);
+    if !frames.is_empty() {
+        let mut summaries = Vec::new();
+        for frame in frames.into_iter() {
+            match bincode::deserialize::<VersionedTransaction>(&frame) {
+                Ok(tx) => {
+                    let s = decode_raw_tx(slot, &tx)?;
+                    summaries.push(s);
+                }
+                Err(_) => {
+                    // skip frames that don't deserialize as VersionedTransaction
+                    continue;
                 }
             }
+        }
+        if !summaries.is_empty() {
             return Ok(summaries);
         }
-        Err(e) => {
-            // both attempts failed: return original error
-            return Err(e).context("raw bytes are neither bincode-serialized VersionedTransaction nor Vec<VersionedTransaction>");
-        }
     }
+
+    // nothing matched
+    Err(anyhow::anyhow!("raw bytes are neither bincode-serialized VersionedTransaction nor Vec<VersionedTransaction> nor recognized framed tx list"))
 }
