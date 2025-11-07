@@ -1,16 +1,14 @@
 syntax = "proto3";
+
 package shredstream;
 
-// Simple empty message (no external dependencies)
-message Empty {}
-
-message Entry {
-  bytes payload = 1;
-  uint64 slot = 2;
-  uint32 index = 3;
+service ShredstreamProxy {
+  rpc SubscribeEntries(SubscribeEntriesRequest) returns (stream Entry);
 }
 
-service ShredStream {
-  // SubscribeEntries stream -> server stream of Entry
-  rpc SubscribeEntries(Empty) returns (stream Entry);
+message SubscribeEntriesRequest {}
+
+message Entry {
+  uint64 slot = 1;
+  bytes entries = 2; // Serialized bytes of Vec<Entry>
 }

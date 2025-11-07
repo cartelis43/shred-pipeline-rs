@@ -146,12 +146,8 @@ impl Receiver {
     }
 }
 
-/// GrpcReceiver connects to a ShredStream gRPC endpoint and forwards Entry.payload
-/// into the provided mpsc::Sender<Vec<u8>> for the Decoder layer to consume.
-///
-/// Usage:
-///   let (tx, rx) = tokio::sync::mpsc::channel(1024);
-///   let receiver = GrpcReceiver::spawn("http://127.0.0.1:9000", tx).await?;
+/// GrpcReceiver connects to a ShredstreamProxy gRPC endpoint and forwards each
+/// `Entry.entries` bytes into the provided mpsc::Sender<Vec<u8>> for the Decoder.
 pub struct GrpcReceiver {
     shutdown_tx: Option<oneshot::Sender<()>>,
     handle: Option<JoinHandle<()>>,
@@ -159,30 +155,24 @@ pub struct GrpcReceiver {
 
 impl GrpcReceiver {
     /// Connect to `endpoint` (e.g. "http://127.0.0.1:9000") and start reading the
-    /// SubscribeEntries stream, forwarding each Entry.payload to `sender`.
+    /// SubscribeEntries stream, forwarding each Entry.entries to `sender`.
     pub async fn spawn(endpoint: &str, sender: Sender<Vec<u8>>) -> anyhow::Result<Self> {
-        // Create shutdown channel for the background task
+        // shutdown channel for background task
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 
-        // Connect to tonic channel
-        let channel = Channel::from_shared(endpoint.to_string())
-            .context("invalid GRPC endpoint URL")?
-            .connect()
+        // Connect to service
+        let mut client = ShredstreamProxyClient::connect(endpoint.to_string())
             .await
             .context("failed to connect to gRPC endpoint")?;
 
-        let mut client = ShredStreamClient::new(channel);
-
-        // create request and subscribe
-        let req = tonic::Request::new(Empty {});
-
-        let mut stream = client
+        // subscribe
+        let req = tonic::Request::new(SubscribeEntriesRequest {});
+        let response = client
             .subscribe_entries(req)
             .await
-            .context("subscribe_entries RPC failed")?
-            .into_inner();
+            .context("subscribe_entries RPC failed")?;
+        let mut stream = response.into_inner();
 
-        // clone sender into task
         let task_sender = sender.clone();
 
         let handle = tokio::spawn(async move {
@@ -191,16 +181,15 @@ impl GrpcReceiver {
                     biased;
 
                     _ = &mut shutdown_rx => {
-                        // shutdown requested
                         break;
                     }
 
                     msg = stream.message() => {
                         match msg {
                             Ok(Some(entry)) => {
-                                // forward payload bytes (best-effort)
-                                if let Err(_e) = task_sender.send(entry.payload).await {
-                                    // downstream closed -> stop
+                                // forward the serialized entries bytes downstream
+                                if task_sender.send(entry.entries).await.is_err() {
+                                    // downstream closed; stop
                                     break;
                                 }
                             }
@@ -209,7 +198,6 @@ impl GrpcReceiver {
                                 break;
                             }
                             Err(e) => {
-                                // log error and stop
                                 eprintln!("grpc stream error: {}", e);
                                 break;
                             }
