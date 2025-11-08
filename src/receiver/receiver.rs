@@ -1,9 +1,9 @@
 use crate::shredstream::shredstream_proxy_client::ShredstreamProxyClient;
 use crate::shredstream::SubscribeEntriesRequest;
+use anyhow::Context;
 use tokio::sync::{mpsc::Sender, oneshot};
 use tokio::task::JoinHandle;
 use tonic::Request;
-use anyhow::Context;
 
 /// GrpcReceiver connects to a ShredstreamProxy gRPC endpoint and forwards each
 /// `Entry.entries` bytes into the provided mpsc::Sender<Vec<u8>> for the Decoder.
