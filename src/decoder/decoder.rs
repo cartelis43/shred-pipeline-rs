@@ -410,16 +410,9 @@ fn decode_chunk_with_fallbacks(slot: u64, chunk: &[u8], out: &mut Vec<DecodedTxS
     }
 
     if let Ok(legacy_tx) = deserialize_with_varint_fallback::<Transaction>(chunk) {
-        if let Some(summary) = decode_legacy_transaction(slot, legacy_tx.clone()) {
+        if let Some(summary) = decode_legacy_transaction(slot, legacy_tx) {
             out.push(summary);
             return true;
-        }
-
-        if let Ok(vtx) = VersionedTransaction::try_from(legacy_tx) {
-            if let Ok(summary) = decode_raw_tx(slot, &vtx) {
-                out.push(summary);
-                return true;
-            }
         }
     }
 
