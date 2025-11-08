@@ -483,9 +483,31 @@ fn try_be_len_prefixed_stream(slot: u64, raw: &[u8]) -> anyhow::Result<Vec<Decod
                 }
 
                 if !decoded_any {
-                    // remember the primary error but continue processing next chunks
-                    last_err = Some(anyhow::anyhow!("chunk decode failed: {}", primary_err));
-                    // continue; (we don't fail fast)
+                    // Log chunk sample for inspection (base64 + hex) so we can decide next steps
+                    let b64_chunk = base64::engine::general_purpose::STANDARD.encode(&chunk);
+                    let hex_chunk = chunk
+                        .iter()
+                        .take(128)
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<Vec<_>>()
+                        .join("");
+                    eprintln!(
+                        "try_be_len_prefixed_stream: unable to decode chunk len={} slot={} sample_base64_prefix={} sample_hex_prefix={}",
+                        chunk.len(),
+                        slot,
+                        if b64_chunk.len() > 512 { &b64_chunk[..512] } else { &b64_chunk },
+                        hex_chunk,
+                    );
+
+                    // Attempt: legacy Transaction (non-versioned) -> convert to VersionedTransaction
+                    if let Ok(legacy_tx) = bincode::deserialize::<Transaction>(&chunk) {
+                        if let Ok(vtx) = VersionedTransaction::try_from(legacy_tx) {
+                            if let Ok(s) = decode_raw_tx(slot, &vtx) {
+                                out.push(s);
+                                decoded_any = true;
+                            }
+                        }
+                    }
                 }
             }
         }
