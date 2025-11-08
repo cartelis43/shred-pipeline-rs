@@ -22,6 +22,10 @@ byteorder = "1.4"
 base64 = "0.21"
 flate2 = "1.0"
 snap = "1.1"
+brotli = "3.3"
+bzip2 = "0.4"
+lz4_flex = "0.11"
+zstd = "0.13"
 
 [build-dependencies]
 tonic-build = "0.9"
