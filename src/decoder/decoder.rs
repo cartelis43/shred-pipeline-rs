@@ -382,45 +382,118 @@ fn try_deserialize_entry_stream(slot: u64, raw: &[u8]) -> Result<Vec<DecodedTxSu
 fn try_be_len_prefixed_stream(slot: u64, raw: &[u8]) -> anyhow::Result<Vec<DecodedTxSummary>> {
     let mut cur = Cursor::new(raw);
     let mut out = Vec::new();
+    let mut last_err: Option<anyhow::Error> = None;
 
     while (cur.position() as usize) < raw.len() {
         // need at least 4 bytes for a BE length; skip zero bytes if they appear as padding
         let mut peek = [0u8; 4];
         let available = (raw.len() as u64).saturating_sub(cur.position()) as usize;
         if available < 4 {
-            return Err(anyhow::anyhow!("not enough bytes for BE length prefix"));
+            last_err = Some(anyhow::anyhow!("not enough bytes for BE length prefix"));
+            break;
         }
-        // read length (big-endian)
+
+        // read 4-byte BE length
         cur.read_exact(&mut peek)?;
         let len_be = Cursor::new(peek).read_u32::<BigEndian>()?;
         if len_be == 0 {
-            // skip a zero-length prefix (likely padding) and continue
+            // skip zero-length prefix (likely padding) and continue
             continue;
         }
         let len_usize = len_be as usize;
         let remaining = (raw.len() as u64).saturating_sub(cur.position()) as usize;
         if remaining < len_usize {
-            return Err(anyhow::anyhow!(
+            last_err = Some(anyhow::anyhow!(
                 "length-prefixed chunk (len={}) truncated (remaining={})",
                 len_usize,
                 remaining
             ));
+            break;
         }
 
         let mut chunk = vec![0u8; len_usize];
         cur.read_exact(&mut chunk)?;
 
-        // Try to decode the chunk using the top-level decoder which
-        // already tries multiple container formats.
+        // Primary: try the top-level decoder (it already tries many formats)
         match decode_raw_txs(slot, &chunk) {
-            Ok(mut v) => out.append(&mut v),
-            Err(e) => return Err(anyhow::anyhow!("failed to decode length-prefixed chunk: {}", e)),
+            Ok(mut v) => {
+                out.append(&mut v);
+                continue;
+            }
+            Err(primary_err) => {
+                // fallback attempts: try common bincode container forms and entry stream
+                let mut decoded_any = false;
+
+                // a) direct VersionedTransaction
+                if let Ok(tx) = bincode::deserialize::<VersionedTransaction>(&chunk) {
+                    if let Ok(s) = decode_raw_tx(slot, &tx) {
+                        out.push(s);
+                        decoded_any = true;
+                    }
+                }
+
+                // b) Vec<VersionedTransaction>
+                if !decoded_any {
+                    if let Ok(txs) = bincode::deserialize::<Vec<VersionedTransaction>>(&chunk) {
+                        for tx in txs.into_iter() {
+                            if let Ok(s) = decode_raw_tx(slot, &tx) {
+                                out.push(s);
+                            }
+                        }
+                        decoded_any = true;
+                    }
+                }
+
+                // c) Vec<Vec<u8>>
+                if !decoded_any {
+                    if let Ok(frames) = bincode::deserialize::<Vec<Vec<u8>>>(&chunk) {
+                        for frame in frames.into_iter() {
+                            if let Ok(tx) = bincode::deserialize::<VersionedTransaction>(&frame) {
+                                if let Ok(s) = decode_raw_tx(slot, &tx) {
+                                    out.push(s);
+                                }
+                            }
+                        }
+                        if !out.is_empty() {
+                            decoded_any = true;
+                        }
+                    }
+                }
+
+                // d) try deserialize consecutive Entry objects inside the chunk
+                if !decoded_any {
+                    let mut cur2 = Cursor::new(&chunk);
+                    let mut any = false;
+                    loop {
+                        match bincode::deserialize_from::<_, Entry>(&mut cur2) {
+                            Ok(entry) => {
+                                for tx_item in entry.transactions {
+                                    if let Ok(s) = decode_raw_tx(slot, &tx_item) {
+                                        out.push(s);
+                                    }
+                                }
+                                any = true;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    if any {
+                        decoded_any = true;
+                    }
+                }
+
+                if !decoded_any {
+                    // remember the primary error but continue processing next chunks
+                    last_err = Some(anyhow::anyhow!("chunk decode failed: {}", primary_err));
+                    // continue; (we don't fail fast)
+                }
+            }
         }
     }
 
-    if out.is_empty() {
-        Err(anyhow::anyhow!("no tx decoded from BE length-prefixed stream"))
-    } else {
+    if !out.is_empty() {
         Ok(out)
+    } else {
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no tx decoded from BE-length-prefixed stream")))
     }
 }
