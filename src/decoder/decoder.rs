@@ -378,6 +378,131 @@ fn decode_frame_bytes_into(
         }
     }
 
+    if let Ok(mut summaries_from_entries) = try_deserialize_entry_stream(slot, frame_bytes) {
+        if !summaries_from_entries.is_empty() {
+            summaries.append(&mut summaries_from_entries);
+            return true;
+        }
+    }
+
+    if let Ok(mut decompressed) = try_decompress_and_decode(slot, frame_bytes) {
+        if !decompressed.is_empty() {
+            summaries.append(&mut decompressed);
+            return true;
+        }
+    }
+
+    let mut scanned = scan_for_embedded_txs(slot, frame_bytes);
+    if !scanned.is_empty() {
+        summaries.append(&mut scanned);
+        return true;
+    }
+
+    false
+}
+
+fn decode_chunk_with_fallbacks(slot: u64, chunk: &[u8], out: &mut Vec<DecodedTxSummary>) -> bool {
+    if let Ok(tx) = deserialize_with_varint_fallback::<VersionedTransaction>(chunk) {
+        if let Ok(summary) = decode_raw_tx(slot, &tx) {
+            out.push(summary);
+            return true;
+        }
+    }
+
+    if let Ok(legacy_tx) = deserialize_with_varint_fallback::<Transaction>(chunk) {
+        if let Some(summary) = decode_legacy_transaction(slot, legacy_tx.clone()) {
+            out.push(summary);
+            return true;
+        }
+
+        if let Ok(vtx) = VersionedTransaction::try_from(legacy_tx) {
+            if let Ok(summary) = decode_raw_tx(slot, &vtx) {
+                out.push(summary);
+                return true;
+            }
+        }
+    }
+
+    if let Ok(versioned) = deserialize_with_varint_fallback::<Vec<VersionedTransaction>>(chunk) {
+        let start = out.len();
+        for tx in versioned {
+            if let Ok(summary) = decode_raw_tx(slot, &tx) {
+                out.push(summary);
+            }
+        }
+        if out.len() > start {
+            return true;
+        }
+    }
+
+    if let Ok(legacy_vec) = deserialize_with_varint_fallback::<Vec<Transaction>>(chunk) {
+        let start = out.len();
+        for tx in legacy_vec {
+            if let Some(summary) = decode_legacy_transaction(slot, tx) {
+                out.push(summary);
+            }
+        }
+        if out.len() > start {
+            return true;
+        }
+    }
+
+    if let Ok(frames) = deserialize_with_varint_fallback::<Vec<Vec<u8>>>(chunk) {
+        let start = out.len();
+        for frame in frames {
+            let _ = decode_frame_bytes_into(slot, &frame, out);
+        }
+        if out.len() > start {
+            return true;
+        }
+    }
+
+    let mut cur = Cursor::new(chunk);
+    let mut appended = false;
+    while (cur.position() as usize) < chunk.len() {
+        let start_pos = cur.position();
+        match deserialize_from_with_varint_fallback::<SolanaEntry, _>(&mut cur) {
+            Ok(entry) => {
+                for tx_item in entry.transactions {
+                    if let Ok(summary) = decode_raw_tx(slot, &tx_item) {
+                        out.push(summary);
+                    }
+                }
+                appended = true;
+            }
+            Err(_) => {
+                cur.seek(SeekFrom::Start(start_pos)).ok();
+                match deserialize_from_with_varint_fallback::<LegacyEntry, _>(&mut cur) {
+                    Ok(entry) => {
+                        for tx in entry.transactions {
+                            if let Some(summary) = decode_legacy_transaction(slot, tx) {
+                                out.push(summary);
+                            }
+                        }
+                        appended = true;
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+    if appended {
+        return true;
+    }
+
+    if let Ok(mut decoded) = try_decompress_and_decode(slot, chunk) {
+        if !decoded.is_empty() {
+            out.append(&mut decoded);
+            return true;
+        }
+    }
+
+    let mut scanned = scan_for_embedded_txs(slot, chunk);
+    if !scanned.is_empty() {
+        out.append(&mut scanned);
+        return true;
+    }
+
     false
 }
 
@@ -814,147 +939,34 @@ fn try_be_len_prefixed_stream(slot: u64, raw: &[u8]) -> anyhow::Result<Vec<Decod
         cur.read_exact(&mut chunk)?;
 
         // Primary: try the top-level decoder (it already tries many formats)
-        match decode_raw_txs(slot, &chunk) {
-            Ok(mut v) => {
-                out.append(&mut v);
-                continue;
-            }
-            Err(_primary_err) => {
-                // fallback attempts: try common bincode container forms and entry stream
-                let mut decoded_any = false;
+        if let Ok(mut v) = decode_raw_txs(slot, &chunk) {
+            out.append(&mut v);
+            continue;
+        }
 
-                // a) direct VersionedTransaction
-                if let Ok(tx) = deserialize_with_varint_fallback::<VersionedTransaction>(&chunk) {
-                    if let Ok(s) = decode_raw_tx(slot, &tx) {
-                        out.push(s);
-                        decoded_any = true;
-                    }
-                }
+        if decode_chunk_with_fallbacks(slot, &chunk, &mut out) {
+            continue;
+        }
 
-                // b) Vec<VersionedTransaction>
-                if !decoded_any {
-                    if let Ok(txs) =
-                        deserialize_with_varint_fallback::<Vec<VersionedTransaction>>(&chunk)
-                    {
-                        for tx in txs.into_iter() {
-                            if let Ok(s) = decode_raw_tx(slot, &tx) {
-                                out.push(s);
-                            }
-                        }
-                        decoded_any = true;
-                    }
-                }
-
-                // c) Vec<Vec<u8>>
-                if !decoded_any {
-                    if let Ok(frames) = deserialize_with_varint_fallback::<Vec<Vec<u8>>>(&chunk) {
-                        let mut appended = false;
-                        for frame in frames.into_iter() {
-                            if decode_frame_bytes_into(slot, &frame, &mut out) {
-                                appended = true;
-                            }
-                        }
-                        if appended {
-                            decoded_any = true;
-                        }
-                    }
-                }
-
-                // d) try deserialize consecutive Entry objects inside the chunk
-                if !decoded_any {
-                    let mut cur2 = Cursor::new(&chunk);
-                    let mut any = false;
-                    loop {
-                        let pos = cur2.position();
-                        match deserialize_from_with_varint_fallback::<SolanaEntry, _>(&mut cur2) {
-                            Ok(entry) => {
-                                for tx_item in entry.transactions {
-                                    if let Ok(s) = decode_raw_tx(slot, &tx_item) {
-                                        out.push(s);
-                                    }
-                                }
-                                any = true;
-                            }
-                            Err(_) => {
-                                cur2.seek(SeekFrom::Start(pos)).ok();
-                                match deserialize_from_with_varint_fallback::<LegacyEntry, _>(
-                                    &mut cur2,
-                                ) {
-                                    Ok(entry) => {
-                                        for tx in entry.transactions {
-                                            if let Some(summary) =
-                                                decode_legacy_transaction(slot, tx)
-                                            {
-                                                out.push(summary);
-                                            }
-                                        }
-                                        any = true;
-                                    }
-                                    Err(_) => break,
-                                }
-                            }
-                        }
-                    }
-                    if any {
-                        decoded_any = true;
-                    }
-                }
-
-                if !decoded_any {
-                    if let Ok(mut summaries) = try_decompress_and_decode(slot, &chunk) {
-                        if !summaries.is_empty() {
-                            out.append(&mut summaries);
-                            decoded_any = true;
-                        }
-                    }
-                }
-
-                if !decoded_any {
-                    let mut scanned = scan_for_embedded_txs(slot, &chunk);
-                    if !scanned.is_empty() {
-                        out.append(&mut scanned);
-                        decoded_any = true;
-                    }
-                }
-
-                if !decoded_any {
-                    // Log chunk sample for inspection (base64 + hex) so we can decide next steps
-                    if should_log_be_len_prefixed_failure(slot, chunk.len()) {
-                        let b64_chunk = base64::engine::general_purpose::STANDARD.encode(&chunk);
-                        let hex_chunk = chunk
-                            .iter()
-                            .take(128)
-                            .map(|b| format!("{:02x}", b))
-                            .collect::<Vec<_>>()
-                            .join("");
-                        eprintln!(
-                            "try_be_len_prefixed_stream: unable to decode chunk len={} slot={} sample_base64_prefix={} sample_hex_prefix={}",
-                            chunk.len(),
-                            slot,
-                            if b64_chunk.len() > 512 { &b64_chunk[..512] } else { &b64_chunk },
-                            hex_chunk,
-                        );
-                    }
-
-                    // Attempt: legacy Transaction (non-versioned) -> convert to VersionedTransaction
-                    if let Ok(legacy_tx) = deserialize_with_varint_fallback::<Transaction>(&chunk) {
-                        match VersionedTransaction::try_from(legacy_tx) {
-                            Ok(vtx) => {
-                                if let Ok(s) = decode_raw_tx(slot, &vtx) {
-                                    out.push(s);
-                                    decoded_any = true;
-                                }
-                            }
-                            Err(_) => {
-                                // Infallible for current conversions; ignore if it ever errors
-                            }
-                        }
-                    }
-                }
-                if decoded_any {
-                    continue;
-                }
-            }
+        if should_log_be_len_prefixed_failure(slot, chunk.len()) {
+            let b64_chunk = base64::engine::general_purpose::STANDARD.encode(&chunk);
+            let hex_chunk = chunk
+                .iter()
+                .take(128)
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join("");
+            eprintln!(
+                "try_be_len_prefixed_stream: unable to decode chunk len={} slot={} sample_base64_prefix={} sample_hex_prefix={}",
+                chunk.len(),
+                slot,
+                if b64_chunk.len() > 512 {
+                    &b64_chunk[..512]
+                } else {
+                    &b64_chunk
+                },
+                hex_chunk,
+            );
         }
     }
 
@@ -1013,7 +1025,7 @@ fn try_le_len_prefixed_stream(slot: u64, raw: &[u8]) -> anyhow::Result<Vec<Decod
         if let Ok(mut v) = decode_raw_txs(slot, &chunk) {
             out.append(&mut v);
         } else {
-            let _ = decode_frame_bytes_into(slot, &chunk, &mut out);
+            let _ = decode_chunk_with_fallbacks(slot, &chunk, &mut out);
         }
     }
     if out.is_empty() {
@@ -1050,7 +1062,7 @@ fn try_le_u16_prefixed_stream(slot: u64, raw: &[u8]) -> anyhow::Result<Vec<Decod
         if let Ok(mut v) = decode_raw_txs(slot, &chunk) {
             out.append(&mut v);
         } else {
-            let _ = decode_frame_bytes_into(slot, &chunk, &mut out);
+            let _ = decode_chunk_with_fallbacks(slot, &chunk, &mut out);
         }
     }
     if out.is_empty() {
