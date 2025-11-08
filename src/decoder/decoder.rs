@@ -156,7 +156,7 @@ use bincode;
 use solana_sdk::transaction::VersionedTransaction;
 use solana_sdk::message::VersionedMessage;
 use std::io::{Cursor, Read};
-use byteorder::{BigEndian, ReadBytesExt};
+use byteorder::{BigEndian, ReadBytesExt, LittleEndian}; // added LittleEndian here
 use solana_entry::entry::Entry;
 use anyhow::anyhow;
 
@@ -410,17 +410,11 @@ fn try_be_len_prefixed_stream(slot: u64, raw: &[u8]) -> anyhow::Result<Vec<Decod
         let mut chunk = vec![0u8; len_usize];
         cur.read_exact(&mut chunk)?;
 
-        // try existing decoder for a single chunk
-        match decode_raw_tx(slot, &chunk) {
-            Ok(summary) => out.push(summary),
-            Err(e) => {
-                // try to decode as Vec<VersionedTransaction> or as Entry stream inside chunk
-                // reuse higher-level routine if available (call decode_raw_txs recursively is fine)
-                match decode_raw_txs(slot, &chunk) {
-                    Ok(mut v) => out.append(&mut v),
-                    Err(_) => return Err(anyhow::anyhow!("failed to decode length-prefixed chunk: {}", e)),
-                }
-            }
+        // Try to decode the chunk using the top-level decoder which
+        // already tries multiple container formats.
+        match decode_raw_txs(slot, &chunk) {
+            Ok(mut v) => out.append(&mut v),
+            Err(e) => return Err(anyhow::anyhow!("failed to decode length-prefixed chunk: {}", e)),
         }
     }
 
