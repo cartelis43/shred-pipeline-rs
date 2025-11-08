@@ -1,11 +1,10 @@
 use std::env;
 use tokio::sync::mpsc;
 use serde::Serialize;
-use std::process;
-
 use shred_pipeline_rs::decoder::{DecodedShred, decode_raw_txs};
 use shred_pipeline_rs::receiver::GrpcReceiver;
 use base64;
+use base64::Engine; // <- <<-- add this so `.encode()` is in scope
 
 #[derive(Serialize)]
 struct OutputTx {
