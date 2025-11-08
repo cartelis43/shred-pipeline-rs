@@ -1,6 +1,7 @@
 use std::env;
 use tokio::sync::mpsc;
 use serde::Serialize;
+use std::process;
 
 use shred_pipeline_rs::decoder::{DecodedShred, decode_raw_txs};
 use shred_pipeline_rs::receiver::GrpcReceiver;
@@ -47,7 +48,6 @@ async fn main() -> anyhow::Result<()> {
             maybe = shred_rx.recv() => {
                 match maybe {
                     Some(shred) => {
-                        // Try to decode the payload as one-or-many transactions.
                         match decode_raw_txs(shred.slot, &shred.payload) {
                             Ok(summaries) => {
                                 for summary in summaries {
@@ -72,24 +72,20 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
                             Err(e) => {
-                                // Log compact error + base64 prefix of payload (no file writes)
+                                // Print full base64 of the first failing payload and exit (temporary)
                                 let b64 = base64::encode(&shred.payload);
-                                let prefix = if b64.len() > 512 { &b64[..512] } else { &b64 };
-                                eprintln!(
-                                    "decode_raw_tx error slot={} index={}: {} payload_len={} payload_base64_prefix={}",
-                                    shred.slot,
-                                    shred.index,
-                                    e,
-                                    shred.payload.len(),
-                                    prefix
-                                );
+                                eprintln!("=== UNPARSABLE_PAYLOAD_FULL_BASE64 START ===");
+                                eprintln!("{}", b64);
+                                eprintln!("=== UNPARSABLE_PAYLOAD_FULL_BASE64 END ===");
+                                eprintln!("decode_raw_tx error slot={} index={}: {} payload_len={}", shred.slot, shred.index, e, shred.payload.len());
+                                // exit so we capture only one example
+                                process::exit(1);
                             }
                         }
                     }
                     None => break,
                 }
             }
-
             _ = tokio::signal::ctrl_c() => {
                 eprintln!("shutdown signal received");
                 break;
