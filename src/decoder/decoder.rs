@@ -155,6 +155,9 @@ use anyhow::{Result, Context, bail};
 use bincode;
 use solana_sdk::transaction::VersionedTransaction;
 use solana_sdk::message::VersionedMessage;
+use solana_sdk::transaction::Transaction; // <- legacy Transaction type
+use std::convert::TryFrom; // <- for VersionedTransaction::try_from(legacy)
+use base64::Engine; // <- brings `.encode()` into scope
 use std::io::{Cursor, Read};
 use byteorder::{BigEndian, ReadBytesExt, LittleEndian}; // added LittleEndian here
 use solana_entry::entry::Entry;
