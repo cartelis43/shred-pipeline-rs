@@ -4,7 +4,8 @@ use bytes::{Buf, Bytes};
 use std::collections::HashMap;
 use flate2::read::{ZlibDecoder, GzDecoder};
 use snap::read::FrameDecoder as SnappyFrameDecoder;
-use std::io::Read;
+use std::io::{Cursor, Read};
+use byteorder::{BigEndian, ReadBytesExt, LittleEndian};
 
 /// A very small, self-contained Decoder layer implementation for the Shred Pipeline.
 ///
@@ -162,7 +163,7 @@ use solana_sdk::transaction::Transaction; // <- legacy Transaction type
 use std::convert::TryFrom; // <- for VersionedTransaction::try_from(legacy)
 use base64::Engine; // <- brings `.encode()` into scope
 use std::io::{Cursor, Read};
-use byteorder::{BigEndian, ReadBytesExt, LittleEndian}; // added LittleEndian here
+use byteorder::{BigEndian, ReadBytesExt, LittleEndian};
 use solana_entry::entry::Entry;
 use anyhow::anyhow;
 
@@ -522,10 +523,16 @@ fn try_be_len_prefixed_stream(slot: u64, raw: &[u8]) -> anyhow::Result<Vec<Decod
 
                     // Attempt: legacy Transaction (non-versioned) -> convert to VersionedTransaction
                     if let Ok(legacy_tx) = bincode::deserialize::<Transaction>(&chunk) {
-                        let vtx = VersionedTransaction::try_from(legacy_tx);
-                        if let Ok(s) = decode_raw_tx(slot, &vtx) {
-                            out.push(s);
-                            decoded_any = true;
+                        match VersionedTransaction::try_from(legacy_tx) {
+                            Ok(vtx) => {
+                                if let Ok(s) = decode_raw_tx(slot, &vtx) {
+                                    out.push(s);
+                                    decoded_any = true;
+                                }
+                            }
+                            Err(_) => {
+                                // Infallible for current conversions; ignore if it ever errors
+                            }
                         }
                     }
                 }
