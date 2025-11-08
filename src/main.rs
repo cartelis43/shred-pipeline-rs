@@ -26,9 +26,22 @@ async fn main() -> anyhow::Result<()> {
     // spawn decoder task
     let decoder = Decoder::spawn(raw_rx, shred_tx);
 
+    // Listen for Ctrl+C once and reuse the future each loop iteration so we respect
+    // the first delivered signal even if more shreds are still arriving.
+    let mut shutdown_signal = tokio::signal::ctrl_c();
+
     // Print JSONL output until stream closed or Ctrl+C
     loop {
         tokio::select! {
+            biased;
+
+            res = &mut shutdown_signal => {
+                if let Err(err) = res {
+                    eprintln!("failed to listen for shutdown signal: {}", err);
+                }
+                eprintln!("shutdown signal received");
+                break;
+            }
             maybe = shred_rx.recv() => {
                 match maybe {
                     Some(shred) => {
@@ -51,12 +64,11 @@ async fn main() -> anyhow::Result<()> {
                     None => break,
                 }
             }
-            _ = tokio::signal::ctrl_c() => {
-                eprintln!("shutdown signal received");
-                break;
-            }
         }
     }
+
+    // Drop the receiver before requesting shutdown so background tasks can exit promptly.
+    drop(shred_rx);
 
     // graceful shutdown
     decoder.shutdown().await;
