@@ -1,11 +1,12 @@
-use std::env;
 use anyhow::Result;
 use base64::Engine;
 use shred_pipeline_rs::decoder::decode_raw_txs;
-use serde_json::json;
+use std::env;
 
 fn main() -> Result<()> {
-    let b64 = env::args().nth(1).expect("usage: decode_scan <base64_payload>");
+    let b64 = env::args()
+        .nth(1)
+        .expect("usage: decode_scan <base64_payload>");
     let raw = base64::engine::general_purpose::STANDARD.decode(&b64)?;
     let len = raw.len();
     println!("payload len = {}", len);
