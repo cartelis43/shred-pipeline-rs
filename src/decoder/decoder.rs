@@ -1,6 +1,10 @@
+use brotli::Decompressor as BrotliDecompressor;
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 use bytes::{Buf, Bytes};
+use bzip2::read::BzDecoder;
 use flate2::read::{GzDecoder, ZlibDecoder};
+use lz4_flex::block::decompress_size_prepended as lz4_decompress_size_prepended;
+use lz4_flex::frame::FrameDecoder as Lz4FrameDecoder;
 use snap::raw::Decoder as SnappyRawDecoder;
 use snap::read::FrameDecoder as SnappyFrameDecoder;
 use std::collections::HashMap;
@@ -8,6 +12,7 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::sync::{Mutex, OnceLock};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use zstd::Decoder as ZstdDecoder;
 
 /// A very small, self-contained Decoder layer implementation for the Shred Pipeline.
 ///
@@ -488,6 +493,11 @@ pub fn decode_raw_txs(slot: u64, raw_tx: &[u8]) -> anyhow::Result<Vec<DecodedTxS
                 if let Ok(s) = decode_raw_tx(slot, &tx) {
                     summaries.push(s);
                 }
+            } else if let Some(summary) = deserialize_with_varint_fallback::<Transaction>(&frame)
+                .ok()
+                .and_then(|tx| decode_legacy_transaction(slot, tx))
+            {
+                summaries.push(summary);
             }
         }
         if !summaries.is_empty() {
@@ -837,6 +847,23 @@ fn try_be_len_prefixed_stream(slot: u64, raw: &[u8]) -> anyhow::Result<Vec<Decod
                 }
 
                 if !decoded_any {
+                    if let Ok(mut summaries) = try_decompress_and_decode(slot, &chunk) {
+                        if !summaries.is_empty() {
+                            out.append(&mut summaries);
+                            decoded_any = true;
+                        }
+                    }
+                }
+
+                if !decoded_any {
+                    let mut scanned = scan_for_embedded_txs(slot, &chunk);
+                    if !scanned.is_empty() {
+                        out.append(&mut scanned);
+                        decoded_any = true;
+                    }
+                }
+
+                if !decoded_any {
                     // Log chunk sample for inspection (base64 + hex) so we can decide next steps
                     if should_log_be_len_prefixed_failure(slot, chunk.len()) {
                         let b64_chunk = base64::engine::general_purpose::STANDARD.encode(&chunk);
@@ -1090,6 +1117,63 @@ fn try_decompress_and_decode(slot: u64, raw: &[u8]) -> anyhow::Result<Vec<Decode
         let mut dec = SnappyRawDecoder::new();
         if let Ok(out) = dec.decompress_vec(raw) {
             if !out.is_empty() {
+                if let Ok(summaries) = decode_raw_txs(slot, &out) {
+                    return Ok(summaries);
+                }
+            }
+        }
+    }
+
+    // try bzip2
+    {
+        let mut dec = BzDecoder::new(Cursor::new(raw));
+        let mut out = Vec::new();
+        if dec.read_to_end(&mut out).is_ok() && !out.is_empty() {
+            if let Ok(summaries) = decode_raw_txs(slot, &out) {
+                return Ok(summaries);
+            }
+        }
+    }
+
+    // try brotli
+    {
+        let mut dec = BrotliDecompressor::new(Cursor::new(raw), 4096);
+        let mut out = Vec::new();
+        if dec.read_to_end(&mut out).is_ok() && !out.is_empty() {
+            if let Ok(summaries) = decode_raw_txs(slot, &out) {
+                return Ok(summaries);
+            }
+        }
+    }
+
+    // try lz4 frame
+    {
+        if let Ok(mut dec) = Lz4FrameDecoder::new(Cursor::new(raw)) {
+            let mut out = Vec::new();
+            if dec.read_to_end(&mut out).is_ok() && !out.is_empty() {
+                if let Ok(summaries) = decode_raw_txs(slot, &out) {
+                    return Ok(summaries);
+                }
+            }
+        }
+    }
+
+    // try lz4 block with size prefix
+    {
+        if let Ok(out) = lz4_decompress_size_prepended(raw) {
+            if !out.is_empty() {
+                if let Ok(summaries) = decode_raw_txs(slot, &out) {
+                    return Ok(summaries);
+                }
+            }
+        }
+    }
+
+    // try zstd
+    {
+        if let Ok(mut dec) = ZstdDecoder::new(Cursor::new(raw)) {
+            let mut out = Vec::new();
+            if dec.read_to_end(&mut out).is_ok() && !out.is_empty() {
                 if let Ok(summaries) = decode_raw_txs(slot, &out) {
                     return Ok(summaries);
                 }
