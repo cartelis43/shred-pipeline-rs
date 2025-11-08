@@ -522,11 +522,10 @@ fn try_be_len_prefixed_stream(slot: u64, raw: &[u8]) -> anyhow::Result<Vec<Decod
 
                     // Attempt: legacy Transaction (non-versioned) -> convert to VersionedTransaction
                     if let Ok(legacy_tx) = bincode::deserialize::<Transaction>(&chunk) {
-                        if let Ok(vtx) = VersionedTransaction::try_from(legacy_tx) {
-                            if let Ok(s) = decode_raw_tx(slot, &vtx) {
-                                out.push(s);
-                                decoded_any = true;
-                            }
+                        let vtx = VersionedTransaction::try_from(legacy_tx);
+                        if let Ok(s) = decode_raw_tx(slot, &vtx) {
+                            out.push(s);
+                            decoded_any = true;
                         }
                     }
                 }
@@ -638,11 +637,8 @@ fn scan_for_embedded_txs(slot: u64, chunk: &[u8]) -> Vec<DecodedTxSummary> {
 
 fn try_decompress_and_decode(slot: u64, raw: &[u8]) -> anyhow::Result<Vec<DecodedTxSummary>> {
     // zlib (raw DEFLATE with zlib header)
-    if let Ok(mut d) = ZlibDecoder::new(raw).into_inner().map(|r| r) {
-        // unused; keep for clarity
-    }
-    // try zlib via read
-    if let Ok(mut dec) = ZlibDecoder::new(raw) {
+    {
+        let mut dec = ZlibDecoder::new(raw);
         let mut out = Vec::new();
         if dec.read_to_end(&mut out).is_ok() && !out.is_empty() {
             if let Ok(summaries) = decode_raw_txs(slot, &out) {
@@ -652,7 +648,8 @@ fn try_decompress_and_decode(slot: u64, raw: &[u8]) -> anyhow::Result<Vec<Decode
     }
 
     // try gzip
-    if let Ok(mut dec) = GzDecoder::new(raw) {
+    {
+        let mut dec = GzDecoder::new(raw);
         let mut out = Vec::new();
         if dec.read_to_end(&mut out).is_ok() && !out.is_empty() {
             if let Ok(summaries) = decode_raw_txs(slot, &out) {
@@ -662,7 +659,8 @@ fn try_decompress_and_decode(slot: u64, raw: &[u8]) -> anyhow::Result<Vec<Decode
     }
 
     // try snappy (frame format)
-    if let Ok(mut dec) = SnappyFrameDecoder::new(raw) {
+    {
+        let mut dec = SnappyFrameDecoder::new(raw);
         let mut out = Vec::new();
         if dec.read_to_end(&mut out).is_ok() && !out.is_empty() {
             if let Ok(summaries) = decode_raw_txs(slot, &out) {
