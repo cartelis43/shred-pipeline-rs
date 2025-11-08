@@ -522,3 +522,32 @@ fn try_be_len_prefixed_stream(slot: u64, raw: &[u8]) -> anyhow::Result<Vec<Decod
         Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no tx decoded from BE-length-prefixed stream")))
     }
 }
+
+fn scan_for_embedded_txs(slot: u64, chunk: &[u8]) -> Vec<DecodedTxSummary> {
+    let mut found = Vec::new();
+    // try starting at each offset (cheap) to find bincode-deserializable tx objects
+    for start in 0..chunk.len().saturating_sub(4) {
+        let mut cur = Cursor::new(&chunk[start..]);
+        if let Ok(tx) = bincode::deserialize_from::<_, VersionedTransaction>(&mut cur) {
+            if let Ok(s) = decode_raw_tx(slot, &tx) {
+                found.push(s);
+                // advance start by consumed bytes to avoid overlapping re-decode (best-effort)
+            }
+        } else {
+            // try Vec<VersionedTransaction> at this offset
+            let mut cur2 = Cursor::new(&chunk[start..]);
+            if let Ok(txs) = bincode::deserialize_from::<_, Vec<VersionedTransaction>>(&mut cur2) {
+                for tx in txs {
+                    if let Ok(s) = decode_raw_tx(slot, &tx) {
+                        found.push(s);
+                    }
+                }
+            }
+        }
+        // small optimization: stop early if we already found many
+        if found.len() > 16 {
+            break;
+        }
+    }
+    found
+}
