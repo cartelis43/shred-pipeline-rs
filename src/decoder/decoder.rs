@@ -342,13 +342,23 @@ pub fn decode_raw_txs(slot: u64, raw_tx: &[u8]) -> anyhow::Result<Vec<DecodedTxS
         }
     }
 
-    // Try big-endian 4-byte length-prefixed stream (handles many network/framing formats)
+    // Try big-endian 4-byte length-prefixed stream (existing)
     if let Ok(summaries) = try_be_len_prefixed_stream(slot, raw_tx) {
         return Ok(summaries);
     }
 
+    // Try little-endian 4-byte length-prefixed stream
+    if let Ok(summaries) = try_le_len_prefixed_stream(slot, raw_tx) {
+        return Ok(summaries);
+    }
+
+    // Try little-endian 2-byte length-prefixed stream
+    if let Ok(summaries) = try_le_u16_prefixed_stream(slot, raw_tx) {
+        return Ok(summaries);
+    }
+
     // nothing matched
-    Err(anyhow::anyhow!("raw bytes are neither bincode-serialized VersionedTransaction nor Vec<VersionedTransaction> nor recognized framed tx list nor Vec<Entry> nor Entry stream nor BE-length-prefixed stream"))
+    Err(anyhow::anyhow!("raw bytes are neither bincode-serialized VersionedTransaction nor Vec<VersionedTransaction> nor recognized framed tx list nor Vec<Entry> nor Entry stream nor BE-length-prefixed stream nor LE-prefixed"))
 }
 
 /// Try to deserialize a stream of bincode-serialized Entry objects from raw bytes.
@@ -520,6 +530,72 @@ fn try_be_len_prefixed_stream(slot: u64, raw: &[u8]) -> anyhow::Result<Vec<Decod
         Ok(out)
     } else {
         Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no tx decoded from BE-length-prefixed stream")))
+    }
+}
+
+fn try_le_len_prefixed_stream(slot: u64, raw: &[u8]) -> anyhow::Result<Vec<DecodedTxSummary>> {
+    let mut cur = Cursor::new(raw);
+    let mut out = Vec::new();
+    while (cur.position() as usize) < raw.len() {
+        let available = raw.len().saturating_sub(cur.position() as usize);
+        if available < 4 {
+            return Err(anyhow::anyhow!("not enough bytes for LE u32 length prefix"));
+        }
+        // read little-endian u32 length
+        let len = cur.read_u32::<LittleEndian>()? as usize;
+        if len == 0 {
+            continue;
+        }
+        let remaining = raw.len().saturating_sub(cur.position() as usize);
+        if remaining < len {
+            return Err(anyhow::anyhow!("le-length-prefixed chunk truncated (len={} remaining={})", len, remaining));
+        }
+        let mut chunk = vec![0u8; len];
+        cur.read_exact(&mut chunk)?;
+        if let Ok(mut v) = decode_raw_txs(slot, &chunk) {
+            out.append(&mut v);
+        } else {
+            // try direct bincode tx(s) as fallback
+            if let Ok(tx) = bincode::deserialize::<VersionedTransaction>(&chunk) {
+                if let Ok(s) = decode_raw_tx(slot, &tx) { out.push(s); }
+            } else if let Ok(txs) = bincode::deserialize::<Vec<VersionedTransaction>>(&chunk) {
+                for tx in txs { if let Ok(s) = decode_raw_tx(slot, &tx) { out.push(s); } }
+            }
+        }
+    }
+    if out.is_empty() {
+        Err(anyhow::anyhow!("no tx decoded from LE-length-prefixed stream"))
+    } else {
+        Ok(out)
+    }
+}
+
+fn try_le_u16_prefixed_stream(slot: u64, raw: &[u8]) -> anyhow::Result<Vec<DecodedTxSummary>> {
+    let mut cur = Cursor::new(raw);
+    let mut out = Vec::new();
+    while (cur.position() as usize) < raw.len() {
+        let available = raw.len().saturating_sub(cur.position() as usize);
+        if available < 2 {
+            return Err(anyhow::anyhow!("not enough bytes for LE u16 length prefix"));
+        }
+        let len = cur.read_u16::<LittleEndian>()? as usize;
+        if len == 0 {
+            continue;
+        }
+        let remaining = raw.len().saturating_sub(cur.position() as usize);
+        if remaining < len {
+            return Err(anyhow::anyhow!("le-u16-length-prefixed chunk truncated (len={} remaining={})", len, remaining));
+        }
+        let mut chunk = vec![0u8; len];
+        cur.read_exact(&mut chunk)?;
+        if let Ok(mut v) = decode_raw_txs(slot, &chunk) {
+            out.append(&mut v);
+        }
+    }
+    if out.is_empty() {
+        Err(anyhow::anyhow!("no tx decoded from LE-u16-length-prefixed stream"))
+    } else {
+        Ok(out)
     }
 }
 
