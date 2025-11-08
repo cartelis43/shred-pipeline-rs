@@ -342,25 +342,13 @@ pub fn decode_raw_txs(slot: u64, raw_tx: &[u8]) -> Result<Vec<DecodedTxSummary>>
     if let Ok(entries) = bincode::deserialize::<Vec<Entry>>(raw_tx) {
         let mut summaries = Vec::new();
         for entry in entries.into_iter() {
-            // Entry.transactions is expected to be Vec<Vec<u8>> (serialized tx bytes).
-            // For compatibility, handle both Vec<Vec<u8>> and any other serialized bytes vector.
-            // Here we assume `entry.transactions` is public Vec<Vec<u8>>.
-            for tx_bytes in entry.transactions {
-                // Try deserialize each tx_bytes as VersionedTransaction
-                if let Ok(tx) = bincode::deserialize::<VersionedTransaction>(&tx_bytes) {
-                    if let Ok(s) = decode_raw_tx(slot, &tx) {
-                        summaries.push(s);
-                    }
-                } else {
-                    // If tx_bytes are not bincode VersionedTransaction, also try raw frame parsing:
-                    let inner_frames = extract_tx_byte_slices(&tx_bytes);
-                    for inner in inner_frames {
-                        if let Ok(tx2) = bincode::deserialize::<VersionedTransaction>(&inner) {
-                            if let Ok(s2) = decode_raw_tx(slot, &tx2) {
-                                summaries.push(s2);
-                            }
-                        }
-                    }
+            // Depending on solana-entry version, Entry::transactions may already contain
+            // deserialized VersionedTransaction objects. Handle that common case directly.
+            for tx_item in entry.transactions {
+                // If tx_item is a VersionedTransaction (most recent solana-entry), decode it directly.
+                // If decoding fails (e.g. V0 address-table), skip that tx.
+                if let Ok(s) = decode_raw_tx(slot, &tx_item) {
+                    summaries.push(s);
                 }
             }
         }
