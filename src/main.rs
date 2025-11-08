@@ -1,12 +1,10 @@
 use std::env;
-use std::fs;
-use std::path::Path;
-
 use tokio::sync::mpsc;
 use serde::Serialize;
 
 use shred_pipeline_rs::decoder::{DecodedShred, decode_raw_txs};
 use shred_pipeline_rs::receiver::GrpcReceiver;
+use base64;
 
 #[derive(Serialize)]
 struct OutputTx {
@@ -74,20 +72,16 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
                             Err(e) => {
-                                // Log error + write full base64 payload to a file for inspection
+                                // Log compact error + base64 prefix of payload (no file writes)
                                 let b64 = base64::encode(&shred.payload);
-                                let filename = format!("/tmp/shred_payload_slot{}_index{}.b64", shred.slot, shred.index);
-                                // write only once (ignore errors)
-                                if !Path::new(&filename).exists() {
-                                    let _ = fs::write(&filename, &b64);
-                                }
+                                let prefix = if b64.len() > 512 { &b64[..512] } else { &b64 };
                                 eprintln!(
-                                    "decode_raw_tx error slot={} index={}: {} payload_len={} written={}",
+                                    "decode_raw_tx error slot={} index={}: {} payload_len={} payload_base64_prefix={}",
                                     shred.slot,
                                     shred.index,
                                     e,
                                     shred.payload.len(),
-                                    filename
+                                    prefix
                                 );
                             }
                         }
