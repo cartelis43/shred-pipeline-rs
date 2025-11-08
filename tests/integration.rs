@@ -3,8 +3,8 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::receiver::Receiver;
     use crate::decoder::Decoder;
+    use crate::receiver::Receiver;
 
     #[test]
     fn test_receiver_initialization() {
@@ -37,10 +37,10 @@ mod tests {
     fn test_integration_receiver_decoder() {
         let mut receiver = Receiver::new();
         let decoder = Decoder::new();
-        
+
         let data = vec![1, 2, 3, 4];
         assert!(receiver.receive(data).is_ok());
-        
+
         let received_data = receiver.get_received_data();
         let result = decoder.decode(&received_data);
         assert!(result.is_ok());
