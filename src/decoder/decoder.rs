@@ -155,9 +155,10 @@ use anyhow::{Result, Context, bail};
 use bincode;
 use solana_sdk::transaction::VersionedTransaction;
 use solana_sdk::message::VersionedMessage;
-use solana_entry::entry::Entry;
 use std::io::Cursor;
 use byteorder::{LittleEndian, ReadBytesExt};
+use solana_entry::entry::Entry;
+use anyhow::anyhow;
 
 #[derive(Debug, Serialize, Clone)]
 pub struct DecodedTxSummary {
@@ -338,25 +339,42 @@ pub fn decode_raw_txs(slot: u64, raw_tx: &[u8]) -> Result<Vec<DecodedTxSummary>>
         }
     }
 
-    // 5) Try Vec<Entry> (Solana entries) and extract transactions
-    if let Ok(entries) = bincode::deserialize::<Vec<Entry>>(raw_tx) {
-        let mut summaries = Vec::new();
-        for entry in entries.into_iter() {
-            // Depending on solana-entry version, Entry::transactions may already contain
-            // deserialized VersionedTransaction objects. Handle that common case directly.
-            for tx_item in entry.transactions {
-                // If tx_item is a VersionedTransaction (most recent solana-entry), decode it directly.
-                // If decoding fails (e.g. V0 address-table), skip that tx.
-                if let Ok(s) = decode_raw_tx(slot, &tx_item) {
-                    summaries.push(s);
-                }
-            }
-        }
-        if !summaries.is_empty() {
-            return Ok(summaries);
-        }
+    // 5b) Try deserializing as a stream of Entries (many Entry objects concatenated)
+    if let Ok(summaries) = try_deserialize_entry_stream(slot, raw_tx) {
+        return Ok(summaries);
     }
 
     // nothing matched
-    Err(anyhow::anyhow!("raw bytes are neither bincode-serialized VersionedTransaction nor Vec<VersionedTransaction> nor recognized framed tx list nor Vec<Entry>"))
+    Err(anyhow::anyhow!("raw bytes are neither bincode-serialized VersionedTransaction nor Vec<VersionedTransaction> nor recognized framed tx list nor Vec<Entry> nor Entry stream"))
+}
+
+/// Try to deserialize a stream of bincode-serialized Entry objects from raw bytes.
+/// This handles the case when entries were serialized consecutively (no outer Vec).
+fn try_deserialize_entry_stream(slot: u64, raw: &[u8]) -> Result<Vec<DecodedTxSummary>> {
+    let mut cur = Cursor::new(raw);
+    let mut summaries = Vec::new();
+
+    while (cur.position() as usize) < raw.len() {
+        // Attempt to deserialize a single Entry from the current cursor.
+        match bincode::deserialize_from::<_, Entry>(&mut cur) {
+            Ok(entry) => {
+                // entry.transactions in current solana-entry versions is Vec<VersionedTransaction>
+                for tx_item in entry.transactions {
+                    if let Ok(s) = decode_raw_tx(slot, &tx_item) {
+                        summaries.push(s);
+                    }
+                }
+            }
+            Err(e) => {
+                // If we cannot deserialize the next Entry, bail with context.
+                return Err(anyhow!("failed to deserialize Entry from stream: {}", e));
+            }
+        }
+    }
+
+    if summaries.is_empty() {
+        Err(anyhow!("no VersionedTransaction decoded from Entry stream"))
+    } else {
+        Ok(summaries)
+    }
 }
