@@ -519,6 +519,20 @@ pub fn decode_raw_txs(slot: u64, raw_tx: &[u8]) -> anyhow::Result<Vec<DecodedTxS
         }
     }
 
+    if let Ok(entries) = deserialize_with_varint_fallback::<Vec<LegacyEntry>>(raw_tx) {
+        let mut summaries = Vec::new();
+        for entry in entries.into_iter() {
+            for tx in entry.transactions.into_iter() {
+                if let Some(summary) = decode_legacy_transaction(slot, tx) {
+                    summaries.push(summary);
+                }
+            }
+        }
+        if !summaries.is_empty() {
+            return Ok(summaries);
+        }
+    }
+
     // 6) length-prefixed frames (u32/u16)
     let frames_lp = extract_tx_byte_slices(raw_tx);
     if !frames_lp.is_empty() {
