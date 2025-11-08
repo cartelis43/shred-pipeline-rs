@@ -5,6 +5,7 @@ use snap::raw::Decoder as SnappyRawDecoder;
 use snap::read::FrameDecoder as SnappyFrameDecoder;
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::sync::{Mutex, OnceLock};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -31,6 +32,32 @@ pub struct Decoder {
     /// handle to the spawned decoder task
     handle: Option<JoinHandle<()>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
+}
+
+static BE_LEN_PREFIX_FAILURE_COUNTS: OnceLock<Mutex<HashMap<(u64, usize), u32>>> = OnceLock::new();
+const BE_LEN_PREFIX_FAILURE_LIMIT: u32 = 3;
+
+fn should_log_be_len_prefixed_failure(slot: u64, len: usize) -> bool {
+    let map = BE_LEN_PREFIX_FAILURE_COUNTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map
+        .lock()
+        .expect("be len-prefixed failure tracker mutex poisoned");
+    let count = guard.entry((slot, len)).or_insert(0);
+    if *count < BE_LEN_PREFIX_FAILURE_LIMIT {
+        *count += 1;
+        true
+    } else {
+        false
+    }
+}
+
+#[cfg(test)]
+fn reset_be_len_prefixed_failure_log() {
+    if let Some(map) = BE_LEN_PREFIX_FAILURE_COUNTS.get() {
+        map.lock()
+            .expect("be len-prefixed failure tracker mutex poisoned")
+            .clear();
+    }
 }
 
 impl Decoder {
@@ -811,20 +838,22 @@ fn try_be_len_prefixed_stream(slot: u64, raw: &[u8]) -> anyhow::Result<Vec<Decod
 
                 if !decoded_any {
                     // Log chunk sample for inspection (base64 + hex) so we can decide next steps
-                    let b64_chunk = base64::engine::general_purpose::STANDARD.encode(&chunk);
-                    let hex_chunk = chunk
-                        .iter()
-                        .take(128)
-                        .map(|b| format!("{:02x}", b))
-                        .collect::<Vec<_>>()
-                        .join("");
-                    eprintln!(
-                        "try_be_len_prefixed_stream: unable to decode chunk len={} slot={} sample_base64_prefix={} sample_hex_prefix={}",
-                        chunk.len(),
-                        slot,
-                        if b64_chunk.len() > 512 { &b64_chunk[..512] } else { &b64_chunk },
-                        hex_chunk,
-                    );
+                    if should_log_be_len_prefixed_failure(slot, chunk.len()) {
+                        let b64_chunk = base64::engine::general_purpose::STANDARD.encode(&chunk);
+                        let hex_chunk = chunk
+                            .iter()
+                            .take(128)
+                            .map(|b| format!("{:02x}", b))
+                            .collect::<Vec<_>>()
+                            .join("");
+                        eprintln!(
+                            "try_be_len_prefixed_stream: unable to decode chunk len={} slot={} sample_base64_prefix={} sample_hex_prefix={}",
+                            chunk.len(),
+                            slot,
+                            if b64_chunk.len() > 512 { &b64_chunk[..512] } else { &b64_chunk },
+                            hex_chunk,
+                        );
+                    }
 
                     // Attempt: legacy Transaction (non-versioned) -> convert to VersionedTransaction
                     if let Ok(legacy_tx) = deserialize_with_varint_fallback::<Transaction>(&chunk) {
@@ -853,6 +882,27 @@ fn try_be_len_prefixed_stream(slot: u64, raw: &[u8]) -> anyhow::Result<Vec<Decod
     } else {
         Err(last_err
             .unwrap_or_else(|| anyhow::anyhow!("no tx decoded from BE-length-prefixed stream")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn be_len_prefixed_failure_logging_is_throttled() {
+        reset_be_len_prefixed_failure_log();
+
+        assert!(should_log_be_len_prefixed_failure(58, 5));
+        assert!(should_log_be_len_prefixed_failure(58, 5));
+        assert!(should_log_be_len_prefixed_failure(58, 5));
+        assert!(!should_log_be_len_prefixed_failure(58, 5));
+
+        // ensure other tuples are unaffected
+        assert!(should_log_be_len_prefixed_failure(59, 5));
+        assert!(should_log_be_len_prefixed_failure(58, 6));
+
+        reset_be_len_prefixed_failure_log();
     }
 }
 
