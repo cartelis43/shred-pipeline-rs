@@ -524,18 +524,41 @@ pub fn decode_raw_txs(slot: u64, raw_tx: &[u8]) -> anyhow::Result<Vec<DecodedTxS
             for tx in entry.transactions.into_iter() {
                 if let Ok(s) = decode_raw_tx(slot, &tx) {
                     summaries.push(s);
-                    continue;
+                    decoded = true;
                 }
-            } else if let Some(summary) = deserialize_with_varint_fallback::<Transaction>(&frame)
-                .ok()
-                .and_then(|tx| decode_legacy_transaction(slot, tx))
-            {
-                summaries.push(summary);
             }
 
-            if let Ok(tx) = deserialize_with_varint_fallback::<Transaction>(&frame) {
-                if let Some(summary) = decode_legacy_transaction(slot, tx) {
-                    summaries.push(summary);
+            if !decoded {
+                if let Ok(tx) = deserialize_with_varint_fallback::<Transaction>(&frame_bytes) {
+                    if let Some(summary) = decode_legacy_transaction(slot, tx) {
+                        summaries.push(summary);
+                        decoded = true;
+                    }
+                }
+            }
+
+            if !decoded {
+                if let Ok(nested) =
+                    deserialize_with_varint_fallback::<Vec<VersionedTransaction>>(&frame_bytes)
+                {
+                    for tx in nested {
+                        if let Ok(s) = decode_raw_tx(slot, &tx) {
+                            summaries.push(s);
+                        }
+                    }
+                    decoded = true;
+                }
+
+                if !decoded {
+                    if let Ok(nested) =
+                        deserialize_with_varint_fallback::<Vec<Transaction>>(&frame_bytes)
+                    {
+                        for tx in nested {
+                            if let Some(summary) = decode_legacy_transaction(slot, tx) {
+                                summaries.push(summary);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -883,6 +906,13 @@ fn try_be_len_prefixed_stream(slot: u64, raw: &[u8]) -> anyhow::Result<Vec<Decod
                                 if let Some(summary) = decode_legacy_transaction(slot, tx) {
                                     out.push(summary);
                                 }
+                            }
+
+                            if let Ok(tx) = deserialize_with_varint_fallback::<Transaction>(&frame)
+                            {
+                                if let Some(summary) = decode_legacy_transaction(slot, tx) {
+                                    out.push(summary);
+                                }
                             } else if let Some(summary) =
                                 deserialize_with_varint_fallback::<Transaction>(&frame)
                                     .ok()
@@ -1050,28 +1080,43 @@ fn try_le_len_prefixed_stream(slot: u64, raw: &[u8]) -> anyhow::Result<Vec<Decod
         if let Ok(mut v) = decode_raw_txs(slot, &chunk) {
             out.append(&mut v);
         } else {
-            // try direct bincode tx(s) as fallback
+            let mut handled = false;
+
             if let Ok(tx) = deserialize_with_varint_fallback::<VersionedTransaction>(&chunk) {
                 if let Ok(s) = decode_raw_tx(slot, &tx) {
                     out.push(s);
+                    handled = true;
                 }
-            } else if let Ok(txs) =
-                deserialize_with_varint_fallback::<Vec<VersionedTransaction>>(&chunk)
-            {
-                for tx in txs {
-                    if let Ok(s) = decode_raw_tx(slot, &tx) {
-                        out.push(s);
+            }
+
+            if !handled {
+                if let Ok(txs) =
+                    deserialize_with_varint_fallback::<Vec<VersionedTransaction>>(&chunk)
+                {
+                    for tx in txs {
+                        if let Ok(s) = decode_raw_tx(slot, &tx) {
+                            out.push(s);
+                        }
                     }
+                    handled = true;
                 }
-            } else if let Some(summary) = deserialize_with_varint_fallback::<Transaction>(&chunk)
-                .ok()
-                .and_then(|tx| decode_legacy_transaction(slot, tx))
-            {
-                out.push(summary);
-            } else if let Ok(txs) = deserialize_with_varint_fallback::<Vec<Transaction>>(&chunk) {
-                for tx in txs {
+            }
+
+            if !handled {
+                if let Ok(tx) = deserialize_with_varint_fallback::<Transaction>(&chunk) {
                     if let Some(summary) = decode_legacy_transaction(slot, tx) {
                         out.push(summary);
+                        handled = true;
+                    }
+                }
+            }
+
+            if !handled {
+                if let Ok(txs) = deserialize_with_varint_fallback::<Vec<Transaction>>(&chunk) {
+                    for tx in txs {
+                        if let Some(summary) = decode_legacy_transaction(slot, tx) {
+                            out.push(summary);
+                        }
                     }
                 }
             }
@@ -1111,19 +1156,43 @@ fn try_le_u16_prefixed_stream(slot: u64, raw: &[u8]) -> anyhow::Result<Vec<Decod
         if let Ok(mut v) = decode_raw_txs(slot, &chunk) {
             out.append(&mut v);
         } else {
+            let mut handled = false;
+
             if let Ok(tx) = deserialize_with_varint_fallback::<VersionedTransaction>(&chunk) {
                 if let Ok(s) = decode_raw_tx(slot, &tx) {
                     out.push(s);
+                    handled = true;
                 }
-            } else if let Some(summary) = deserialize_with_varint_fallback::<Transaction>(&chunk)
-                .ok()
-                .and_then(|tx| decode_legacy_transaction(slot, tx))
-            {
-                out.push(summary);
-            } else if let Ok(txs) = deserialize_with_varint_fallback::<Vec<Transaction>>(&chunk) {
-                for tx in txs {
+            }
+
+            if !handled {
+                if let Ok(txs) =
+                    deserialize_with_varint_fallback::<Vec<VersionedTransaction>>(&chunk)
+                {
+                    for tx in txs {
+                        if let Ok(s) = decode_raw_tx(slot, &tx) {
+                            out.push(s);
+                        }
+                    }
+                    handled = true;
+                }
+            }
+
+            if !handled {
+                if let Ok(tx) = deserialize_with_varint_fallback::<Transaction>(&chunk) {
                     if let Some(summary) = decode_legacy_transaction(slot, tx) {
                         out.push(summary);
+                        handled = true;
+                    }
+                }
+            }
+
+            if !handled {
+                if let Ok(txs) = deserialize_with_varint_fallback::<Vec<Transaction>>(&chunk) {
+                    for tx in txs {
+                        if let Some(summary) = decode_legacy_transaction(slot, tx) {
+                            out.push(summary);
+                        }
                     }
                 }
             }
