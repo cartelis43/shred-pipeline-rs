@@ -2,6 +2,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use bytes::{Buf, Bytes};
 use std::collections::HashMap;
+use flate2::read::{ZlibDecoder, GzDecoder};
+use snap::read::FrameDecoder as SnappyFrameDecoder;
+use std::io::Read;
 
 /// A very small, self-contained Decoder layer implementation for the Shred Pipeline.
 ///
@@ -357,8 +360,13 @@ pub fn decode_raw_txs(slot: u64, raw_tx: &[u8]) -> anyhow::Result<Vec<DecodedTxS
         return Ok(summaries);
     }
 
+    // Try decompress (zlib/gzip/snappy) and re-run decode on decompressed bytes
+    if let Ok(summaries) = try_decompress_and_decode(slot, raw_tx) {
+        return Ok(summaries);
+    }
+
     // nothing matched
-    Err(anyhow::anyhow!("raw bytes are neither bincode-serialized VersionedTransaction nor Vec<VersionedTransaction> nor recognized framed tx list nor Vec<Entry> nor Entry stream nor BE-length-prefixed stream nor LE-prefixed"))
+    Err(anyhow::anyhow!("raw bytes are neither bincode-serialized VersionedTransaction nor Vec<VersionedTransaction> nor recognized framed tx list nor Vec<Entry> nor Entry stream nor BE-length-prefixed stream nor LE-prefixed nor recognized compressed form"))
 }
 
 /// Try to deserialize a stream of bincode-serialized Entry objects from raw bytes.
@@ -626,4 +634,42 @@ fn scan_for_embedded_txs(slot: u64, chunk: &[u8]) -> Vec<DecodedTxSummary> {
         }
     }
     found
+}
+
+fn try_decompress_and_decode(slot: u64, raw: &[u8]) -> anyhow::Result<Vec<DecodedTxSummary>> {
+    // zlib (raw DEFLATE with zlib header)
+    if let Ok(mut d) = ZlibDecoder::new(raw).into_inner().map(|r| r) {
+        // unused; keep for clarity
+    }
+    // try zlib via read
+    if let Ok(mut dec) = ZlibDecoder::new(raw) {
+        let mut out = Vec::new();
+        if dec.read_to_end(&mut out).is_ok() && !out.is_empty() {
+            if let Ok(summaries) = decode_raw_txs(slot, &out) {
+                return Ok(summaries);
+            }
+        }
+    }
+
+    // try gzip
+    if let Ok(mut dec) = GzDecoder::new(raw) {
+        let mut out = Vec::new();
+        if dec.read_to_end(&mut out).is_ok() && !out.is_empty() {
+            if let Ok(summaries) = decode_raw_txs(slot, &out) {
+                return Ok(summaries);
+            }
+        }
+    }
+
+    // try snappy (frame format)
+    if let Ok(mut dec) = SnappyFrameDecoder::new(raw) {
+        let mut out = Vec::new();
+        if dec.read_to_end(&mut out).is_ok() && !out.is_empty() {
+            if let Ok(summaries) = decode_raw_txs(slot, &out) {
+                return Ok(summaries);
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!("decompression attempts failed"))
 }
