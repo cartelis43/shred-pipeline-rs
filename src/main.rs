@@ -28,7 +28,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Listen for Ctrl+C once and reuse the future each loop iteration so we respect
     // the first delivered signal even if more shreds are still arriving.
-    let mut shutdown_signal = tokio::signal::ctrl_c();
+    let shutdown_signal = tokio::signal::ctrl_c();
+    tokio::pin!(shutdown_signal);
 
     // Print JSONL output until stream closed or Ctrl+C
     loop {
