@@ -71,16 +71,25 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
                             Err(e) => {
-                                // keep logs compact: log error + base64 prefix (first 512 chars)
+                                // keep logs compact: log error + base64 prefix (first 512 chars) + hex prefix (first 64 bytes)
                                 let b64 = base64::engine::general_purpose::STANDARD.encode(&shred.payload);
                                 let prefix = if b64.len() > 512 { &b64[..512] } else { &b64 };
+                                let hex_prefix = shred
+                                    .payload
+                                    .iter()
+                                    .take(64)
+                                    .map(|b| format!("{:02x}", b))
+                                    .collect::<Vec<_>>()
+                                    .join("");
                                 eprintln!(
-                                    "decode_raw_tx error slot={} index={}: {} payload_len={} payload_base64_prefix={}",
+                                    "decode_raw_tx error slot={} index={}: {} payload_len={} payload_base64_prefix={} payload_hex_prefix={} first_hex_bytes={}",
                                     shred.slot,
                                     shred.index,
                                     e,
                                     shred.payload.len(),
-                                    prefix
+                                    prefix,
+                                    hex_prefix,
+                                    shred.payload.len().min(64)
                                 );
                              }
                         }
