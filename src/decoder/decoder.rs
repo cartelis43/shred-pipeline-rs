@@ -493,6 +493,25 @@ pub fn decode_raw_txs(slot: u64, raw_tx: &[u8]) -> anyhow::Result<Vec<DecodedTxS
                 if let Ok(s) = decode_raw_tx(slot, &tx) {
                     summaries.push(s);
                 }
+            } else if let Some(summary) = deserialize_with_varint_fallback::<Transaction>(&frame)
+                .ok()
+                .and_then(|tx| decode_legacy_transaction(slot, tx))
+            {
+                summaries.push(summary);
+            }
+        }
+        if !summaries.is_empty() {
+            return Ok(summaries);
+        }
+    }
+
+    if let Ok(entries) = deserialize_with_varint_fallback::<Vec<LegacyEntry>>(raw_tx) {
+        let mut summaries = Vec::new();
+        for entry in entries.into_iter() {
+            for tx in entry.transactions.into_iter() {
+                if let Some(summary) = decode_legacy_transaction(slot, tx) {
+                    summaries.push(summary);
+                }
             }
         }
         if !summaries.is_empty() {
