@@ -15,6 +15,7 @@ anyhow = "1.0"
 tonic = { version = "0.9", features = ["transport"] }
 prost = "0.11"
 solana-sdk = { version = "1.16", default-features = false, features = ["full"] }
+solana-entry = { version = "1.16", default-features = false, features = ["full"] }
 bincode = "1.3"
 bs58 = "0.4"
 byteorder = "1.4"
