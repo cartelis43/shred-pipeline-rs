@@ -155,8 +155,8 @@ use anyhow::{Result, Context, bail};
 use bincode;
 use solana_sdk::transaction::VersionedTransaction;
 use solana_sdk::message::VersionedMessage;
-use std::io::Cursor;
-use byteorder::{LittleEndian, ReadBytesExt};
+use std::io::{Cursor, Read};
+use byteorder::{BigEndian, ReadBytesExt};
 use solana_entry::entry::Entry;
 use anyhow::anyhow;
 
@@ -289,7 +289,7 @@ fn extract_tx_byte_slices(raw: &[u8]) -> Vec<Vec<u8>> {
 /// 3) bincode deserialize as Vec<Vec<u8>> -> each inner bincode deserialize VersionedTransaction
 /// 4) length-prefixed frames (u32/u16) -> each frame bincode deserialize VersionedTransaction
 /// 5) bincode deserialize as Vec<Entry> (Solana entries) -> for each entry.transactions try deserialize each tx bytes
-pub fn decode_raw_txs(slot: u64, raw_tx: &[u8]) -> Result<Vec<DecodedTxSummary>> {
+pub fn decode_raw_txs(slot: u64, raw_tx: &[u8]) -> anyhow::Result<Vec<DecodedTxSummary>> {
     // 1) Try single tx
     if let Ok(tx) = bincode::deserialize::<VersionedTransaction>(raw_tx) {
         let s = decode_raw_tx(slot, &tx)
@@ -339,13 +339,13 @@ pub fn decode_raw_txs(slot: u64, raw_tx: &[u8]) -> Result<Vec<DecodedTxSummary>>
         }
     }
 
-    // 5b) Try deserializing as a stream of Entries (many Entry objects concatenated)
-    if let Ok(summaries) = try_deserialize_entry_stream(slot, raw_tx) {
+    // Try big-endian 4-byte length-prefixed stream (handles many network/framing formats)
+    if let Ok(summaries) = try_be_len_prefixed_stream(slot, raw_tx) {
         return Ok(summaries);
     }
 
     // nothing matched
-    Err(anyhow::anyhow!("raw bytes are neither bincode-serialized VersionedTransaction nor Vec<VersionedTransaction> nor recognized framed tx list nor Vec<Entry> nor Entry stream"))
+    Err(anyhow::anyhow!("raw bytes are neither bincode-serialized VersionedTransaction nor Vec<VersionedTransaction> nor recognized framed tx list nor Vec<Entry> nor Entry stream nor BE-length-prefixed stream"))
 }
 
 /// Try to deserialize a stream of bincode-serialized Entry objects from raw bytes.
@@ -376,5 +376,57 @@ fn try_deserialize_entry_stream(slot: u64, raw: &[u8]) -> Result<Vec<DecodedTxSu
         Err(anyhow!("no VersionedTransaction decoded from Entry stream"))
     } else {
         Ok(summaries)
+    }
+}
+
+fn try_be_len_prefixed_stream(slot: u64, raw: &[u8]) -> anyhow::Result<Vec<DecodedTxSummary>> {
+    let mut cur = Cursor::new(raw);
+    let mut out = Vec::new();
+
+    while (cur.position() as usize) < raw.len() {
+        // need at least 4 bytes for a BE length; skip zero bytes if they appear as padding
+        let mut peek = [0u8; 4];
+        let available = (raw.len() as u64).saturating_sub(cur.position()) as usize;
+        if available < 4 {
+            return Err(anyhow::anyhow!("not enough bytes for BE length prefix"));
+        }
+        // read length (big-endian)
+        cur.read_exact(&mut peek)?;
+        let len_be = Cursor::new(peek).read_u32::<BigEndian>()?;
+        if len_be == 0 {
+            // skip a zero-length prefix (likely padding) and continue
+            continue;
+        }
+        let len_usize = len_be as usize;
+        let remaining = (raw.len() as u64).saturating_sub(cur.position()) as usize;
+        if remaining < len_usize {
+            return Err(anyhow::anyhow!(
+                "length-prefixed chunk (len={}) truncated (remaining={})",
+                len_usize,
+                remaining
+            ));
+        }
+
+        let mut chunk = vec![0u8; len_usize];
+        cur.read_exact(&mut chunk)?;
+
+        // try existing decoder for a single chunk
+        match decode_raw_tx(slot, &chunk) {
+            Ok(summary) => out.push(summary),
+            Err(e) => {
+                // try to decode as Vec<VersionedTransaction> or as Entry stream inside chunk
+                // reuse higher-level routine if available (call decode_raw_txs recursively is fine)
+                match decode_raw_txs(slot, &chunk) {
+                    Ok(mut v) => out.append(&mut v),
+                    Err(_) => return Err(anyhow::anyhow!("failed to decode length-prefixed chunk: {}", e)),
+                }
+            }
+        }
+    }
+
+    if out.is_empty() {
+        Err(anyhow::anyhow!("no tx decoded from BE length-prefixed stream"))
+    } else {
+        Ok(out)
     }
 }
