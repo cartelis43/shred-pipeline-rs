@@ -1,11 +1,13 @@
-use std::env;
 use anyhow::Result;
 use base64::Engine;
 use serde_json;
 use shred_pipeline_rs::decoder::decode_raw_txs;
+use std::env;
 
 fn main() -> Result<()> {
-    let b64 = env::args().nth(1).expect("usage: decode_sample <base64_payload>");
+    let b64 = env::args()
+        .nth(1)
+        .expect("usage: debug_entries <base64_payload>");
     let raw = base64::engine::general_purpose::STANDARD.decode(&b64)?;
     match decode_raw_txs(0, &raw) {
         Ok(summaries) => {
